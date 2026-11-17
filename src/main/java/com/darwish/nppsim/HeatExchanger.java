@@ -49,6 +49,8 @@ class HeatExchanger implements Connectable, Serializable {
     // ---- 控制 ----
     double isoIn = 1.0, isoOut = 1.0;           // 进汽/出汽阀（0..1）
 
+    /** 管侧额定存水 kg（= 模型初始存水量；水位以此为基准） */
+    private static final double NOMINAL_SECONDARY_WATER_KG = 20000.0;
     private double waterTemperature = 160.0;
     private double pressure = 0.70;             // Connectable 口径（= 二回路压力）
     private double feedKgAccum = 0.0;           // 本 tick 累计给水 kg
@@ -56,7 +58,18 @@ class HeatExchanger implements Connectable, Serializable {
 
     /** 抽汽导纳：满压差 6.2 MPa 时约 1550 kg/s/台（两台合计 3100 kg/s ≈ 4800 MW 的产汽量）。
      *  原值 500 会让两台合计抽 6200 kg/s（额定产汽量的两倍），汽包压力必然被抽塌。 */
-    private static final double DRAW_KGS_PER_MPA = 548.0;   // 6.9−4.0=2.9 MPa 下两台合计 3180 kg/s
+    /**
+     * 一次侧抽汽系数 kg/(s·MPa)（2026-11-07 由 548 提高到 1500）。
+     *
+     * <p>旧值按"两台在 2.9 MPa 压差下合计 3180 kg/s"标定，但实际运行压差只有
+     * 2.0~2.1 MPa（汽包 6.2 / 二次侧 4.1），加上二次侧给水受限，一台换热器
+     * 只能抽 570 kg/s、产汽 446 kg/s —— 汽机主汽门全开要 640 kg/s/台，
+     * 供不应求 → 分离器被抽干 → 汽机进汽 0 → 逆功率 → AZ-1 停堆。</p>
+     *
+     * <p>实测瓶颈其实在二次侧给水（抽汽被 maxCondensableKg 按给水量限流），
+     * 这里保持原标定 548 kg/(s·MPa)，不靠放大抽汽系数掩盖。</p>
+     */
+    private static final double DRAW_KGS_PER_MPA = 548.0;
 
     HeatExchanger(String id) {
         this.id = id;
@@ -144,13 +157,26 @@ class HeatExchanger implements Connectable, Serializable {
         secondarySteamKgs = Math.max(0.0, Math.min(maxSteam, feedKgs + bufferKgs));
         secondarySteamKgs = Math.min(secondarySteamKgs, 6000.0);
 
-        /* 给水 > 可蒸发量时，多余的水不能只"存"在管侧（旧实现把超出 80 t 的部分
-         * 无声吞掉，给水回路的水位就一直掉，而且这些水永远不会变成蒸汽进汽水分离器）。
-         * 现在按 tick 退回给水系统（NPPSim 回收到除氧器），管侧存量保持恒定。 */
-        double excess = Math.max(0.0, feedKgs - secondarySteamKgs);
+        /* 管侧存水守恒（2026-11-04 修正"除氧器莫名进水"）。
+         *
+         * 旧实现把"给水 − 蒸发量"整个当成排水退回除氧器，于是 `secondaryWaterKg`
+         * 每 tick 增量恒为 0 —— 管侧水位是个常数，给水阀的水位控制永远看不到偏差，
+         * 阀门就一直全开：给水一路打进管侧、又一秒 2000 多 kg 原样退回除氧器，
+         * 面板上就是"没有任何操作，除氧器却被源源不断灌水"。
+         *
+         * 现在存水按真实进出量变化：进水多于蒸发 → 水位上涨 → 给水阀（目标就是管侧水位）
+         * 自动关小 → 流量回落，形成闭环。只有涨到 120 t 上限时才把多出来的部分退回，
+         * 保证既不吞水、也不会把除氧器淹掉。 */
+        double excess = 0.0;
+        secondaryWaterKg += (feedKgs - secondarySteamKgs) * dt;
+        if (secondaryWaterKg > 120000.0) {
+            excess = (secondaryWaterKg - 120000.0) / dt;
+            secondaryWaterKg = 120000.0;
+        }
+        if (secondaryWaterKg < 2000.0) {
+            secondaryWaterKg = 2000.0;
+        }
         secondaryDrainKgs = excess;
-        secondaryWaterKg += (feedKgs - secondarySteamKgs - excess) * dt;
-        secondaryWaterKg = Math.max(2000.0, Math.min(120000.0, secondaryWaterKg));
 
         steamOutKgs = isoOut * secondarySteamKgs;
         secondaryFlowKgs = feedKgs;
@@ -184,7 +210,15 @@ class HeatExchanger implements Connectable, Serializable {
     @Override public double getSteamVolume() { return 0.0; }
     @Override public double getWaterTemperature() { return waterTemperature; }
     @Override public double getSteamTemperature() { return secondarySteamTC; }
-    @Override public double getWaterLevel() { return 0.0; }
+    /**
+     * 管侧（水侧）水位 %：相对额定存水的偏差（2026-11-02 环路自检修）。
+     *
+     * <p>原来这里恒返回 0，导致"给水阀"这类以二次侧存水为控制对象的回路
+     * 拿不到任何水位信号。额定取 20 t（模型初始存水量）。</p>
+     */
+    @Override public double getWaterLevel() {
+        return (secondaryWaterKg / NOMINAL_SECONDARY_WATER_KG - 1.0) * 100.0;
+    }
     @Override public void updateSteamOutflow(double flow, double tempC) { }
     @Override public void updateSteamInflow(double flow, double tempC) { }
     @Override public void updateWaterOutflow(double flow, double tempC) { }

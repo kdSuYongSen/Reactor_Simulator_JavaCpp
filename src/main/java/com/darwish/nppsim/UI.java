@@ -34,6 +34,21 @@ public class UI extends javax.swing.JFrame implements Serializable {
         uiUpdateRate = Math.max(20, ms);
     }
 
+    /* ---- 界面构建分段计时（2026-11-11 性能）：只在 -Dnpp.startup.timing=true 时输出 ---- */
+    private static final boolean STARTUP_TIMING = Boolean.getBoolean("npp.startup.timing");
+    private static long uiMark;
+
+    private static void uiTiming(String label) {
+        if (!STARTUP_TIMING) {
+            return;
+        }
+        long now = System.nanoTime();
+        if (uiMark != 0L) {
+            System.out.printf("[UI] %-30s %6d ms%n", label, (now - uiMark) / 1_000_000L);
+        }
+        uiMark = now;
+    }
+
     /** MTK 面板访问器（设置 → 原版设置 用；未开新游戏时为 null） */
     public MTK getMTK1() {
         return mTK1;
@@ -61,12 +76,25 @@ public class UI extends javax.swing.JFrame implements Serializable {
     private ProtectedButton guardAZ1K, guardBSM, guardAZ5;
     /** 控制棒数量限制开关（ON=选中超过限值禁止整组拔出；OFF=不限制） */
     static boolean rodSelectionLimitEnabled = true;
+    /** 长按放大镜（热键见 {@link ZoomSettings}，与布局编辑器共用同一份配置） */
+    private final ZoomLoupe zoomLoupe = new ZoomLoupe();
+    /** 已经装上的缩放热键（改设置时要先撤掉旧的） */
+    private final java.util.List<javax.swing.KeyStroke> zoomStrokes = new java.util.ArrayList<>();
+    /**
+     * 放大键是否还按着（2026-11-03 晚）。
+     *
+     * <p>系统会对按住的键不停发 keyPressed（自动重复）。有了这个状态位，
+     * "上一次还没松开"时就直接不执行：不会反复抓屏，也不会在按住放大键的同时
+     * 又去响应倍率 / 复位快捷键。</p>
+     */
+    private boolean magnifyHeld;
     /** 子组件绝对布局：面板 key → 切换前的原始 LayoutManager（用于恢复） */
     private final java.util.Map<String, java.awt.LayoutManager> savedChildLayouts = new java.util.LinkedHashMap<>();
     /** 子组件绝对布局：面板 key → 各子组件切换前的位置（未列出的子组件保持原位） */
     private final java.util.Map<String, java.awt.Rectangle[]> childFallbackBounds = new java.util.LinkedHashMap<>();
     
     public UI() {
+        uiMark = STARTUP_TIMING ? System.nanoTime() : 0L;
         hush = true;
         try {
             // 恢复原有的 NetBeans DarkMetal 金属风格外观（由反编译源码移植，见 library-java/org/netbeans/swing/laf/dark）
@@ -77,7 +105,9 @@ public class UI extends javax.swing.JFrame implements Serializable {
         } catch (Exception e) {
             e.printStackTrace();
         }
+        uiTiming("LAF / 主题");
         initComponents();
+        uiTiming("initComponents（含 MTK 堆芯图）");
         // 主反应堆窗口：可自由缩放/最大化（只有「主菜单窗口」Loader 禁止最大化）
         java.awt.Dimension startSize = new java.awt.Dimension(1366, 768);
         setSize(startSize);
@@ -86,6 +116,9 @@ public class UI extends javax.swing.JFrame implements Serializable {
         setLocationRelativeTo(null);
         selectedControlRods = new ArrayList<>();
         elementsToUpdate = new ArrayList<>();
+        /* 报警盘保持原 jar 的样子：普通 JPanel + GridLayout(3,5)、14 只灯，
+         * 布局与尺寸都在 initComponents 里，这里不要再动。
+         * 汽轮机的报警留在汽轮机窗口自己的报警区（见 TGUI），不搬过来。 */
         annunciator = new Annunciator(annunciatorPanel);
         // AZ 保护盖：AZ-1K / BSM / AZ-5 第一次点击只开盖（单击无效，文字保留、亮黄闪烁），
         // 10 秒内再按一次才真正触发；10 秒无响应自动复位；按"复位 AZ"时联动复位
@@ -95,8 +128,12 @@ public class UI extends javax.swing.JFrame implements Serializable {
         /* 主窗口的 Window 菜单也交给统一清单重建（2026-10-25）：
          * 否则主窗口少了新增的 8 个页面，而子窗口有 —— 又是一个"选项不一致"。 */
         WindowMenu.install(this);
+        uiTiming("报警器 / 窗口菜单");
         initLayoutSync();   // 外部布局编辑器：恢复已保存布局 + 启动文件轮询
+        uiTiming("initLayoutSync（布局恢复 + 轮询）");
+        installZoomHotkeys();   // 长按放大 / 放大倍率（热键可在设置里改）
         this.setVisible(true);
+        uiTiming("setVisible（首帧绘制）");
         /* 棒速度块要钉在"插入"按键下面：方块运行时是绝对布局（PageLayout 把 layout 置 null），
          * 布局文件里也没有这个新控件，所以用一个 400 ms 的轻量定时器对齐一次（只在位置变了才 setBounds）。
          * 这样在布局编辑器里挪动"插入"后，棒速度块也会跟着走。 */
@@ -130,13 +167,46 @@ public class UI extends javax.swing.JFrame implements Serializable {
         toggleAR2.getModel().setSelected(autoControl.automaticRodController.isEnabled()[2]);
         toggleLAC.getModel().setSelected(autoControl.automaticRodController.isEnabled()[0]);
         setpoint.setLcdValue(autoControl.automaticRodController.getSetpoint());
-        createOrContinue(PCSUI.class, true, true);
-        createOrContinue(TGUI.class, true, true);
-        createOrContinue(CondensateUI.class, true, true);
-        createOrContinue(FeedwaterUI.class, true, true);
-        createOrContinue(DearatorUI.class, true, true);
-        createOrContinue(MCPUI.class, true, true);
-        createOrContinue(SteamLoopUI.class, false, true);   // 读数窗口按自身尺寸，不套 1366×768
+        /* 子窗口预热（2026-11-11 性能）：以前在构造函数里**同步**建 7 个子窗口，
+         * 虽然 justInit=true 不显示，但每个窗口的 SteelSeries 仪表 + 布局要 1 s 左右，
+         * 合计 7 s 全压在启动关键路径上（实测主界面要 13 s 才出来）。
+         * 现在改成主窗口显示完再在后台逐个预热：用户感知的启动时间直接砍掉这 7 s，
+         * 功能不变 —— 子窗口仍然提前建好，菜单点开是瞬时的。 */
+        prewarmSubWindows();
+    }
+
+    /**
+     * 后台预热子窗口（不显示，只建对象）。
+     *
+     * <p>顺序与原实现一致，只是延后到主窗口首帧之后；每建一个稍作停顿，
+     * 避免和仿真线程抢 CPU 造成开局掉帧。窗口构造本身与原实现同线程模型（非 EDT），
+     * 所以行为不变。</p>
+     */
+    private void prewarmSubWindows() {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(1200);            // 等主窗口首帧画完
+                Class<?>[] windows = {PCSUI.class, TGUI.class, CondensateUI.class,
+                        FeedwaterUI.class, DearatorUI.class, MCPUI.class};
+                for (Class<?> c : windows) {
+                    if (!NPPSim.isRunning()) {
+                        return;
+                    }
+                    createOrContinue(c, true, true);
+                    Thread.sleep(120);
+                }
+                if (NPPSim.isRunning()) {
+                    createOrContinue(SteamLoopUI.class, false, true);   // 读数窗口按自身尺寸
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (Throwable ex) {
+                // 预热失败不影响主界面：真正打开时 createOrContinue 还会再建一次
+                ex.printStackTrace();
+            }
+        }, "ui-subwindow-prewarm");
+        t.setDaemon(true);
+        t.start();
     }
 
     /* ================================================================
@@ -154,7 +224,10 @@ public class UI extends javax.swing.JFrame implements Serializable {
             lastTitleSecond = simulationSeconds;
             setTitle(NPPMath.formatSecondsToDaysAndTime(autoControl.getSimulationTime(), true));
         }
-        for (UIUpdateable i: elementsToUpdate) {
+        /* 遍历快照（2026-11-11）：子窗口现在是后台线程预热/按需创建的，
+         * createOrContinue 会在别的线程 add 进 elementsToUpdate；
+         * 直接遍历原表偶发 ConcurrentModificationException，会让这一帧所有窗口停止刷新。 */
+        for (UIUpdateable i: new java.util.ArrayList<>(elementsToUpdate)) {
             try {
                 i.update();
             } catch (Exception e) {
@@ -237,7 +310,10 @@ public class UI extends javax.swing.JFrame implements Serializable {
                                         autoAzOff.setSelected(true);
                                     }
                                 }
-                                rodLimit1.setBackground(autoControl.az1Control.isTripped() ? Annunciator.REDON_COLOR : Annunciator.REDOFF_COLOR);
+                                /* AZ-1 灯 = AZ-1（一回路压力高）这个**信号**，不是 AZ-1K。
+                                 * AZ-1K 是快速保护（有按钮、动作即全棒插入），和 AZ-1 分开看，
+                                 * 否则"灯亮"和"棒动了"会被混为一谈（2026-11-03）。 */
+                                rodLimit1.setBackground(autoControl.az1Signal.isTripped() ? Annunciator.REDON_COLOR : Annunciator.REDOFF_COLOR);
                                 rodLimit2.setBackground(autoControl.az2Control.isTripped() ? Annunciator.YELLOWON_COLOR : Annunciator.YELLOWOFF_COLOR);
                                 rodLimit5.setBackground(autoControl.az3Control.isTripped() ? Annunciator.ORANGEON_COLOR : Annunciator.ORANGEOFF_COLOR);
                                 rodLimit4.setBackground(autoControl.az4Control.isTripped() ? Annunciator.ORANGEON_COLOR : Annunciator.ORANGEOFF_COLOR);
@@ -422,7 +498,8 @@ public class UI extends javax.swing.JFrame implements Serializable {
     }
 
     public static void createOrContinue(Class element, boolean fullscreen, boolean justInit) {
-        for (UIUpdateable i: elementsToUpdate) {
+        // 快照遍历：可能被后台预热线程与 EDT 同时调用（见 update() 里的说明）
+        for (UIUpdateable i: new java.util.ArrayList<>(elementsToUpdate)) {
             if (i.getClass() == element) {
                 i.setVisibility(true);
                 ((JFrame)i).toFront();
@@ -912,15 +989,21 @@ public class UI extends javax.swing.JFrame implements Serializable {
         // 点击行为改由 ProtectedButton 保护盖接管（构造器里包装：需连按两次确认）
 
         // ---- 手动 AZ 跳闸按键 AZ-2 ~ AZ-5（AZ-5 的保护盖在构造器里包装）----
+        /* 2026-11-03 起 AZ-2~AZ-6 是"信号"，不再插棒：按钮只发出该保护信号
+         * （报警 + 联锁）。真要停堆用 AZ-5（手动紧急停堆）/ AZ-1K / BSM。 */
         azButton2 = azTripButton("AZ-2");
+        azButton2.setToolTipText(Localization.t("AZ signal only"));
         azButton2.addActionListener(ev -> autoControl.az2Control.trip());
         azButton3 = azTripButton("AZ-3");
+        azButton3.setToolTipText(Localization.t("AZ signal only"));
         azButton3.addActionListener(ev -> autoControl.az3Control.trip());
         azButton4 = azTripButton("AZ-4");
+        azButton4.setToolTipText(Localization.t("AZ signal only"));
         azButton4.addActionListener(ev -> autoControl.az4Control.trip());
         azButton5 = azTripButton("AZ-5");
         azButton5.setToolTipText(Localization.t("Manual scram"));
         azButton6 = azTripButton("AZ-6");
+        azButton6.setToolTipText(Localization.t("AZ signal only"));
         azButton6.addActionListener(ev -> autoControl.az6Control.trip());
         // AZ-2 / AZ-3 合成一行，放在指示灯阵列正下方（利用面板内既有空间，不改变整体尺寸）
         azTripPanel = new javax.swing.JPanel();
@@ -2262,6 +2345,104 @@ public class UI extends javax.swing.JFrame implements Serializable {
                 layoutBlockMap, null);
     }
 
+    /**
+     * 安装/重建缩放热键（2026-11-03）。
+     *
+     * <p>主窗口的面板都是真实组件，整页缩放会把布局和命中判定搅乱，所以这里做成
+     * **长按放大镜**：按住热键抓鼠标周围一小块，放大后盖在玻璃面板上；松开恢复。
+     * 热键与倍率存在 {@code ui_zoom_keys.json}，与布局编辑器共用 —— 两边改一处即可。</p>
+     */
+    void installZoomHotkeys() {
+        setGlassPane(zoomLoupe);
+        zoomLoupe.setVisible(false);
+        // 按住时切到别的程序会收不到松开事件，失去焦点就兜底撤掉放大镜
+        addWindowFocusListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowLostFocus(java.awt.event.WindowEvent e) {
+                magnifyHeld = false;      // 松开事件丢了，状态位也得跟着清
+                zoomLoupe.hideLoupe();
+            }
+        });
+        bindZoomKeys();
+    }
+
+    /** 按当前配置重新绑定（设置对话框点"应用"时调用） */
+    void bindZoomKeys() {
+        javax.swing.InputMap im = getRootPane().getInputMap(
+                javax.swing.JComponent.WHEN_IN_FOCUSED_WINDOW);
+        javax.swing.ActionMap am = getRootPane().getActionMap();
+        for (javax.swing.KeyStroke ks : zoomStrokes) {
+            im.remove(ks);
+        }
+        zoomStrokes.clear();
+
+        ZoomSettings zs = ZoomSettings.load();
+        zoomLoupe.setFactor(zs.loupe);
+        magnifyHeld = false;          // 重新绑定后当没按过
+
+        bindZoomKey(im, am, javax.swing.KeyStroke.getKeyStroke(zs.magnify, 0), "zoomMagnifyOn",
+                () -> {
+                    /* 上一个快捷键还没松开就不执行（2026-11-03 晚）：
+                     * 按住不放时系统会不停发 keyPressed（自动重复），以前每次都重新抓屏，
+                     * 画面一闪一闪、还白烧 CPU。这里按状态位挡住，一次按住只放大一次。 */
+                    if (magnifyHeld) {
+                        return;
+                    }
+                    magnifyHeld = true;
+                    zoomLoupe.setFactor(ZoomSettings.load().loupe);
+                    java.awt.PointerInfo pi = java.awt.MouseInfo.getPointerInfo();
+                    zoomLoupe.showAt(pi == null ? null : pi.getLocation());
+                });
+        bindZoomKey(im, am, javax.swing.KeyStroke.getKeyStroke(zs.magnify, 0, true),
+                "zoomMagnifyOff", () -> {
+                    magnifyHeld = false;
+                    zoomLoupe.hideLoupe();
+                });
+        // 放大键按着的时候，倍率/复位一律不响应（等松开再按）
+        bindZoomKey(im, am, javax.swing.KeyStroke.getKeyStroke(zs.zoomIn, 0), "zoomIn",
+                () -> {
+                    if (!magnifyHeld) {
+                        changeLoupeFactor(+0.25);
+                    }
+                });
+        bindZoomKey(im, am, javax.swing.KeyStroke.getKeyStroke(zs.zoomOut, 0), "zoomOut",
+                () -> {
+                    if (!magnifyHeld) {
+                        changeLoupeFactor(-0.25);
+                    }
+                });
+        bindZoomKey(im, am, javax.swing.KeyStroke.getKeyStroke(zs.fit, 0), "zoomFit",
+                () -> {
+                    if (!magnifyHeld) {
+                        changeLoupeFactor(Double.NaN);
+                    }
+                });
+    }
+
+    private void bindZoomKey(javax.swing.InputMap im, javax.swing.ActionMap am,
+                             javax.swing.KeyStroke ks, String name, Runnable action) {
+        im.put(ks, name);
+        am.put(name, new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) {
+                action.run();
+            }
+        });
+        zoomStrokes.add(ks);
+    }
+
+    /** 调整放大镜倍率（NaN = 复位成默认值）并提示；同时写回配置 */
+    private void changeLoupeFactor(double delta) {
+        ZoomSettings zs = ZoomSettings.load();
+        double f = Double.isNaN(delta) ? 2.5 : zs.loupe + delta;
+        f = Math.round(Math.max(1.2, Math.min(6.0, f)) * 10.0) / 10.0;
+        zs.loupe = f;
+        zs.save();
+        // 纯放大镜：只按新倍率重画当前这块快照（不重新抓屏，倍率也不会自己变）
+        zoomLoupe.setFactor(f);
+        if (autoControl != null) {
+            autoControl.recordEvent(String.format("放大镜 %.1f×", f));
+        }
+    }
+
     /** 检查 ui_layout.json 是否有变化，有则实时应用（EDT 上调用） */
     private void syncLayoutFile() {
         java.io.File f = UiLayoutFile.locate();
@@ -2287,6 +2468,9 @@ public class UI extends javax.swing.JFrame implements Serializable {
                 return;
             }
             applyAbsoluteLayout(panels);
+            /* 清单要跟着刷新（2026-11-03）：ui_layout_pages.json 原来只在启动时导出一次，
+             * 之后改的位置编辑器看不到，下回一保存就按旧快照把位置写回去。 */
+            PageLayout.dumpManifest();
             if (newPath) {
                 System.out.println("[Layout] 已加载布局文件: " + layoutFilePath
                         + "（" + panels.size() + " 个面板）");
@@ -2320,43 +2504,49 @@ public class UI extends javax.swing.JFrame implements Serializable {
                 continue;
             }
             UiLayoutFile.Entry b = e.getValue();
-            c.setBounds(b.x, b.y, b.w, b.h);
-            // 编辑器里勾掉"可见"：主窗口的方块也照做（外部工具对任何窗口的可见性都有效）
-            if (c.isVisible() != b.visible) {
-                c.setVisible(b.visible);
-            }
-            maxX = Math.max(maxX, b.x + b.w);
-            maxY = Math.max(maxY, b.y + b.h);
-            // 放大功能：内部按键/文字/仪表 = 尺寸比例自动缩放 × 编辑器"内容缩放"倍率
-            java.awt.Rectangle design = layoutFallbackBounds.get(e.getKey());
-            if (design != null && design.width > 0 && design.height > 0) {
-                double s = PanelContentScaler.scaleFor(design.width, design.height, b.w, b.h);
-                s = PanelContentScaler.combine(s, b.contentScale);
-                contentScaler.apply(c, s);
-            }
-            // 子组件（小方块）：面板内部按键/数据显示的绝对位置
-            if (b.children != null) {
-                applyPanelChildren(e.getKey(), c, b.children);
-                childKeysThisRound.add(e.getKey());
-            }
-            /* 更深的组件（"0/2" 这类索引路径）：外部布局编辑器写的就是这一段。
-             * 走 PageLayout.placeNode，和子窗口用同一套"父链逐层接管"逻辑，避免第二份实现。 */
-            if (b.nodes != null) {
-                java.util.List<String> paths = new java.util.ArrayList<>(b.nodes.keySet());
-                paths.sort((x, y) -> {
-                    int dx = x.split("/").length, dy = y.split("/").length;
-                    return dx != dy ? Integer.compare(dx, dy) : x.compareTo(y);
-                });
-                for (String path : paths) {
-                    UiLayoutFile.Child ch = b.nodes.get(path);
-                    java.awt.Component t = childByPath(c, path);
-                    if (t != null) {
-                        PageLayout.placeNode(t, c, new java.awt.Rectangle(
-                                ch.x, ch.y,
-                                ch.w > 0 ? ch.w : t.getWidth(),
-                                ch.h > 0 ? ch.h : t.getHeight()), ch.visible);
+            try {
+                c.setBounds(b.x, b.y, b.w, b.h);
+                // 编辑器里勾掉"可见"：主窗口的方块也照做（外部工具对任何窗口的可见性都有效）
+                if (c.isVisible() != b.visible) {
+                    c.setVisible(b.visible);
+                }
+                maxX = Math.max(maxX, b.x + b.w);
+                maxY = Math.max(maxY, b.y + b.h);
+                // 放大功能：内部按键/文字/仪表 = 尺寸比例自动缩放 × 编辑器"内容缩放"倍率
+                java.awt.Rectangle design = layoutFallbackBounds.get(e.getKey());
+                if (design != null && design.width > 0 && design.height > 0) {
+                    double s = PanelContentScaler.scaleFor(design.width, design.height, b.w, b.h);
+                    s = PanelContentScaler.combine(s, b.contentScale);
+                    contentScaler.apply(c, s);
+                }
+                // 子组件（小方块）：面板内部按键/数据显示的绝对位置
+                if (b.children != null) {
+                    applyPanelChildren(e.getKey(), c, b.children);
+                    childKeysThisRound.add(e.getKey());
+                }
+                /* 更深的组件（"0/2" 这类索引路径）：外部布局编辑器写的就是这一段。
+                 * 走 PageLayout.placeNode，和子窗口用同一套"父链逐层接管"逻辑，避免第二份实现。 */
+                if (b.nodes != null) {
+                    java.util.List<String> paths = new java.util.ArrayList<>(b.nodes.keySet());
+                    paths.sort((x, y) -> {
+                        int dx = x.split("/").length, dy = y.split("/").length;
+                        return dx != dy ? Integer.compare(dx, dy) : x.compareTo(y);
+                    });
+                    for (String path : paths) {
+                        UiLayoutFile.Child ch = b.nodes.get(path);
+                        java.awt.Component t = childByPath(c, path);
+                        if (t != null) {
+                            PageLayout.placeNode(t, c, new java.awt.Rectangle(
+                                    ch.x, ch.y,
+                                    ch.w > 0 ? ch.w : t.getWidth(),
+                                    ch.h > 0 ? ch.h : t.getHeight()), ch.visible);
+                        }
                     }
                 }
+            } catch (RuntimeException ex) {
+                /* 单个方块出问题（比如某个组件没有字体/尺寸异常）不能连累整轮：
+                 * 旧实现里一处抛异常，后面的方块就全部不摆，表现正是"有的组件改不动"。 */
+                System.out.println("[Layout] 方块 " + e.getKey() + " 应用失败（已跳过）: " + ex);
             }
         }
         // 本轮不再带 children 的面板：恢复其原有内部布局
@@ -2424,11 +2614,17 @@ public class UI extends javax.swing.JFrame implements Serializable {
                 }
                 continue;
             }
-            if (comp.getX() != ch.x || comp.getY() != ch.y) {
-                comp.setLocation(ch.x, ch.y);
+            /* 位置、尺寸、可见性都按布局文件来（2026-11-03）。
+             * 旧实现只挪位置、尺寸一律强制回默认 —— 编辑器里拖右下角把按键改大/改小，
+             * 保存后没有任何效果，看起来就是"组件改不动"。 */
+            int tw = ch.w > 0 ? ch.w : fb.width;
+            int th = ch.h > 0 ? ch.h : fb.height;
+            if (comp.getX() != ch.x || comp.getY() != ch.y
+                    || comp.getWidth() != tw || comp.getHeight() != th) {
+                comp.setBounds(ch.x, ch.y, tw, th);
             }
-            if (comp.getWidth() != fb.width || comp.getHeight() != fb.height) {
-                comp.setSize(fb.width, fb.height);   // 尺寸不变，只调位置
+            if (comp.isVisible() != ch.visible) {
+                comp.setVisible(ch.visible);
             }
         }
         panel.revalidate();
@@ -2553,10 +2749,34 @@ public class UI extends javax.swing.JFrame implements Serializable {
             cmd.add(script.getAbsolutePath());
             cmd.add("--out");
             cmd.add(out.getAbsolutePath());
-            new ProcessBuilder(cmd)
-                    .directory(script.getParentFile())
-                    .start();
-            System.out.println("[Layout] 已启动布局编辑器: " + pyw + " " + script + " --out " + out);
+            /* 同上：pythonw 也没有控制台，脚本报错（比如解释器没有 tkinter）时会静默退出。
+             * 把输出写进 layout_editor_py.log，启动失败时弹窗提示。 */
+            java.io.File pyLog = new java.io.File(out.getParentFile(), "layout_editor_py.log");
+            ProcessBuilder pb = new ProcessBuilder(cmd).directory(script.getParentFile());
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.to(pyLog));
+            final Process proc = pb.start();
+            System.out.println("[Layout] 已启动布局编辑器: " + pyw + " " + script + " --out " + out
+                    + " 日志=" + pyLog);
+            javax.swing.Timer watch = new javax.swing.Timer(2000, ev -> {
+                ((javax.swing.Timer) ev.getSource()).stop();
+                if (proc.isAlive()) {
+                    return;
+                }
+                int code;
+                try {
+                    code = proc.exitValue();
+                } catch (IllegalThreadStateException alive) {
+                    return;
+                }
+                String tail = tailOf(pyLog, 20);
+                javax.swing.JOptionPane.showMessageDialog(this,
+                        "布局编辑器启动后立即退出（exit=" + code + "）。\n"
+                                + "日志：" + pyLog.getAbsolutePath() + "\n\n" + tail,
+                        "布局编辑器", javax.swing.JOptionPane.ERROR_MESSAGE);
+            });
+            watch.setRepeats(false);
+            watch.start();
         } catch (Exception ex) {
             javax.swing.JOptionPane.showMessageDialog(this,
                     "启动布局编辑器失败：\n" + ex, "布局编辑器",
@@ -2629,8 +2849,35 @@ public class UI extends javax.swing.JFrame implements Serializable {
             cmd.add("-jar");
             cmd.add(jar.getAbsolutePath());
             cmd.add(dir.getAbsolutePath());
-            new ProcessBuilder(cmd).directory(dir).start();
-            System.out.println("[Layout] 已启动布局编辑器 jar: " + jar + " 目录=" + dir);
+            /* 输出重定向到日志（2026-11-03）：javaw 没有控制台，进程启动失败时用户
+             * 什么都看不到（比如 jar 的字节码版本比运行游戏的 JVM 新，会直接
+             * UnsupportedClassVersionError 退出）。现在写进 layout_editor.log，
+             * 并且 1.5 s 后检查进程是否已经死了，死了就弹窗把日志尾巴贴出来。 */
+            java.io.File log = new java.io.File(dir, "layout_editor.log");
+            ProcessBuilder pb = new ProcessBuilder(cmd).directory(dir);
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.to(log));
+            final Process proc = pb.start();
+            System.out.println("[Layout] 已启动布局编辑器 jar: " + jar + " 目录=" + dir + " 日志=" + log);
+            javax.swing.Timer watch = new javax.swing.Timer(1500, ev -> {
+                ((javax.swing.Timer) ev.getSource()).stop();
+                if (proc.isAlive()) {
+                    return;
+                }
+                int code;
+                try {
+                    code = proc.exitValue();
+                } catch (IllegalThreadStateException alive) {
+                    return;
+                }
+                String tail = tailOf(log, 20);
+                javax.swing.JOptionPane.showMessageDialog(this,
+                        "布局编辑器启动后立即退出（exit=" + code + "）。\n"
+                                + "日志：" + log.getAbsolutePath() + "\n\n" + tail,
+                        Localization.t("Layout Editor"), javax.swing.JOptionPane.ERROR_MESSAGE);
+            });
+            watch.setRepeats(false);
+            watch.start();
         } catch (Exception ex) {
             javax.swing.JOptionPane.showMessageDialog(this,
                     "启动布局编辑器 jar 失败：\n" + ex, Localization.t("Layout Editor"),
@@ -2711,6 +2958,25 @@ public class UI extends javax.swing.JFrame implements Serializable {
     }
 
     /** 找 javaw（无控制台）：优先用当前 JVM 自带的，找不到退回 java */
+    /** 读日志文件最后 n 行（启动失败时贴给用户看） */
+    private static String tailOf(java.io.File f, int n) {
+        if (f == null || !f.isFile()) {
+            return "（没有日志输出）";
+        }
+        try {
+            java.util.List<String> lines = java.nio.file.Files.readAllLines(
+                    f.toPath(), java.nio.charset.StandardCharsets.UTF_8);
+            int from = Math.max(0, lines.size() - n);
+            StringBuilder sb = new StringBuilder();
+            for (int i = from; i < lines.size(); i++) {
+                sb.append(lines.get(i)).append('\n');
+            }
+            return sb.length() == 0 ? "（日志为空）" : sb.toString();
+        } catch (Exception e) {
+            return "（日志读取失败：" + e + "）";
+        }
+    }
+
     private static String findJavaw() {
         String home = System.getProperty("java.home");
         if (home != null) {

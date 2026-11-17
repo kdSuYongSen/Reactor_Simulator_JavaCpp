@@ -116,15 +116,9 @@ class PlaceholderUI extends JFrame implements UIUpdateable {
     @Override public void acknowledge() { }
 }
 
-/** 应急柴油发电机 */
-class EmergencyDieselUI extends PlaceholderUI {
-    EmergencyDieselUI() { super("EmergencyDieselUI", "Emergency Diesel Generators"); }
-}
+/* 应急柴油发电机（2026-11-12 晚）：已由真正的 {@link EmergencyDieselUI} 取代，不再用占位页。 */
 
-/** 电网系统 */
-class GridSystemUI extends PlaceholderUI {
-    GridSystemUI() { super("GridSystemUI", "Grid System"); }
-}
+/* 电网系统（2026-11-12）：已由真正的 {@link GridSystemUI} 取代，不再用占位页。 */
 
 /** ECCS 应急堆芯冷却 */
 class ECCSUI extends PlaceholderUI {

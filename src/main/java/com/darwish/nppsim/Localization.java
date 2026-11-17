@@ -96,6 +96,46 @@ public final class Localization {
         return key;
     }
 
+    /**
+     * 当前界面语言**实际会显示**的全部字符（去重，不含换行/制表）。
+     *
+     * <p>给字体选择用：判断一个字体文件能不能显示本语言，光靠一句样本文字不够 ——
+     * 译文里可能有样本里没有的生僻字/标点。这里把当前语言表与英文回退表的**所有值**都取出来，
+     * 得到真正会画到屏幕上的字符集合，逐个核对覆盖度就不会再出现局部方框。</p>
+     */
+    public static String usedCharacters() {
+        ensureInit();
+        java.util.LinkedHashSet<Character> set = new java.util.LinkedHashSet<>();
+        collectChars(table, set);
+        collectChars(fallback, set);
+        StringBuilder sb = new StringBuilder(Math.min(set.size(), 8000));
+        for (Character c : set) {
+            if (sb.length() >= 8000) {
+                break;
+            }
+            char ch = c;
+            if (ch == '\n' || ch == '\r' || ch == '\t') {
+                continue;
+            }
+            sb.append(ch);
+        }
+        return sb.toString();
+    }
+
+    private static void collectChars(Map<String, String> map, java.util.Set<Character> out) {
+        if (map == null) {
+            return;
+        }
+        for (String v : map.values()) {
+            if (v == null) {
+                continue;
+            }
+            for (int i = 0; i < v.length(); i++) {
+                out.add(v.charAt(i));
+            }
+        }
+    }
+
     /** 读取 i18n/<lang>.json（UTF-8，Java 8 兼容的读法） */
     private static Map<String, String> load(Language lang) {
         Map<String, String> map = new HashMap<>();

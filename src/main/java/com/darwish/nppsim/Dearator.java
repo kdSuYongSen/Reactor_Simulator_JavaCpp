@@ -1,6 +1,6 @@
 package com.darwish.nppsim;
 
-public class Dearator extends WaterSteamComponent implements Connectable, UIReadable, SteamSupplyLimit {
+public class Dearator extends WaterSteamComponent implements Connectable, UIReadable, SteamSupplyLimit, WaterSupplyLimit {
     final SteamValve steamInlet, steamOutlet;
     /**
      * 蒸汽入口阀 Cv。全厂蒸汽改走除氧器后每台要通 ~550 kg/s：
@@ -22,7 +22,9 @@ public class Dearator extends WaterSteamComponent implements Connectable, UIRead
     private final double nominalWaterVolume;
     private double initialSteamMass; // this would be air in reality
     private double steamMass = 0.0; // kg
-    private double waterMass = 320000.0; // 初始水量 kg（≈额定容积，340 m³ @ ~100C）
+    /** 额定存水量 kg（≈340 m³ @ 100 °C） */
+    static final double NOMINAL_WATER_KG = 320000.0;
+    private double waterMass = NOMINAL_WATER_KG; // 初始水量 kg（≈额定容积，340 m³ @ ~100C）
     private double thermalLoss = 0.0; // TODO conductive energy loss Mwt
 
     // calculated results from the update thread stored here for use in other
@@ -178,8 +180,14 @@ public class Dearator extends WaterSteamComponent implements Connectable, UIRead
         double pos = steamInlet.getPosition();
         if (over > 0.05) {                      // kg/tick（1 kg/s），溢汽了 → 关小
             steamInlet.setPosition((float) Math.max(0.0, pos - 0.010));
-        } else if (steamMass < STEAM_SPACE_MAX_KG * 0.5 && waterTemperature < tsat - 2.0) {
-            steamInlet.setPosition((float) Math.min(1.0, pos + 0.008));   // 欠热 → 开大
+        } else if (inflowKgs > 1.0 && steamMass < STEAM_SPACE_MAX_KG * 0.5
+                && waterTemperature < tsat - 2.0) {
+            /* 欠热才开大 —— 但**必须真有水流过**（2026-11-04 修正）。
+             * 原来不看进水：冷态开机时除氧器里是 20 °C 的死水、根本没有给水流过，
+             * 判据 waterTemperature < tsat−2 永远成立 → 进汽阀从 8% 一路自动开到 100%，
+             * 面板上就出现"阀门自己跑到 100%"、"莫名其妙有汽进来凝成水"的现象。
+             * 没有水流过时，加热毫无意义（凝结热只会白白存进 320 t 死水），阀门保持不动。 */
+            steamInlet.setPosition((float) Math.min(1.0, pos + 0.008));
         }
 
         steamTemperature = tsat;
@@ -276,7 +284,19 @@ public class Dearator extends WaterSteamComponent implements Connectable, UIRead
         return 0;
     }
 
+    /**
+     * 可供给水泵抽走的水量（kg/本 tick，2026-11-04）。
+     *
+     * <p>给水泵吸入母管原先不问源端有多少水，给水流量大于凝结水回收量时
+     * 会把除氧器一路抽到负水位。这里保留 35 % 存水作为"不可抽"余量，
+     * 抽到该水位以下时给水自然减量，水位不再失控。</p>
+     */
     @Override
+    public double availableWaterKg() {
+        double floor = NOMINAL_WATER_KG * 0.35;
+        return Math.max(0.0, waterMass - floor);
+    }
+
     public double getWaterMass() {
         return waterMass;
     }

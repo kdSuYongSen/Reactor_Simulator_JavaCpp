@@ -54,9 +54,16 @@ final class UiLayoutFile {
         final Map<String, Child> children;
         /** 更深层组件：索引路径（"0/2"）→ Child；无则为 null */
         final Map<String, Child> nodes;
+        /** 背景 / 前景色（"#RRGGBB" 或 "#AARRGGBB"；null = 不改，2026-11-16） */
+        final String bg, fg;
 
         Entry(int x, int y, int w, int h, double contentScale, boolean visible,
               Map<String, Child> children, Map<String, Child> nodes) {
+            this(x, y, w, h, contentScale, visible, children, nodes, null, null);
+        }
+
+        Entry(int x, int y, int w, int h, double contentScale, boolean visible,
+              Map<String, Child> children, Map<String, Child> nodes, String bg, String fg) {
             this.x = x;
             this.y = y;
             this.w = w;
@@ -65,6 +72,8 @@ final class UiLayoutFile {
             this.visible = visible;
             this.children = children;
             this.nodes = nodes;
+            this.bg = bg;
+            this.fg = fg;
         }
     }
 
@@ -77,18 +86,26 @@ final class UiLayoutFile {
         final int w, h;
         /** 是否可见（缺失时为 true） */
         final boolean visible;
+        /** 背景 / 前景色（"#RRGGBB"，null = 不改） */
+        final String bg, fg;
 
         Child(String cls, int x, int y) {
-            this(cls, x, y, 0, 0, true);
+            this(cls, x, y, 0, 0, true, null, null);
         }
 
         Child(String cls, int x, int y, int w, int h, boolean visible) {
+            this(cls, x, y, w, h, visible, null, null);
+        }
+
+        Child(String cls, int x, int y, int w, int h, boolean visible, String bg, String fg) {
             this.cls = cls;
             this.x = x;
             this.y = y;
             this.w = w;
             this.h = h;
             this.visible = visible;
+            this.bg = bg;
+            this.fg = fg;
         }
     }
 
@@ -97,6 +114,10 @@ final class UiLayoutFile {
         File layout = writePath();
         File dir = layout.getParentFile();
         return new File(dir != null ? dir : new File("."), "ui_layout_children.json");
+    }
+
+    private static String emptyToNull(String s) {
+        return s == null || s.trim().isEmpty() ? null : s.trim();
     }
 
     /** 当前生效的布局文件；三处都不存在时返回 null（表示使用默认 GroupLayout） */
@@ -213,7 +234,9 @@ final class UiLayoutFile {
                         children.put(idx, new Child(c.optString("cls", ""),
                                 c.optInt("x", 0), c.optInt("y", 0),
                                 c.optInt("w", 0), c.optInt("h", 0),
-                                c.optBoolean("visible", true)));
+                                c.optBoolean("visible", true),
+                                emptyToNull(c.optString("bg", "")),
+                                emptyToNull(c.optString("fg", ""))));
                     }
                     if (children.isEmpty()) {
                         children = null;
@@ -232,13 +255,16 @@ final class UiLayoutFile {
                         nodes.put(path, new Child(c.optString("cls", ""),
                                 c.optInt("x", 0), c.optInt("y", 0),
                                 c.optInt("w", 0), c.optInt("h", 0),
-                                c.optBoolean("visible", true)));
+                                c.optBoolean("visible", true),
+                                emptyToNull(c.optString("bg", "")),
+                                emptyToNull(c.optString("fg", ""))));
                     }
                     if (nodes.isEmpty()) {
                         nodes = null;
                     }
                 }
-                out.put(key, new Entry(x, y, w, h, scale, visible, children, nodes));
+                out.put(key, new Entry(x, y, w, h, scale, visible, children, nodes,
+                        emptyToNull(b.optString("bg", "")), emptyToNull(b.optString("fg", ""))));
             }
         }
         return out;

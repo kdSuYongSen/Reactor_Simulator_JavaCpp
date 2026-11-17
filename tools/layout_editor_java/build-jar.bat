@@ -16,7 +16,9 @@ if not exist "%JDK%\bin\javac.exe" (
   exit /b 1
 )
 
-set DEP=%HERE%..\..\target\RBMK-1500-Simulator-1.00Alpha-jar-with-dependencies.jar
+rem 依赖：当前构建产物（org.json 从这里取）；找不到再退回旧包名
+set DEP=%HERE%..\..\target\RBMK-1500-Simulator-1.0.1-jar-with-dependencies.jar
+if not exist "%DEP%" set DEP=%HERE%..\..\target\RBMK-1500-Simulator-1.00Alpha-jar-with-dependencies.jar
 if not exist "%DEP%" (
   echo [ERR] dependency jar not found: %DEP%
   echo       run "mvn package" once first ^(only org.json is needed^).
@@ -42,9 +44,13 @@ echo [2/3] packing jar...
 if exist RBMK-LayoutEditor.jar del /q RBMK-LayoutEditor.jar
 "%JDK%\bin\jar.exe" cfm RBMK-LayoutEditor.jar build\manifest.mf -C build\classes .
 
-echo [3/3] copying next to the simulator...
+echo [3/3] copying next to the simulator and into resources...
 copy /y RBMK-LayoutEditor.jar "%HERE%..\..\RBMK-LayoutEditor.jar" >nul
 if exist "%HERE%..\..\target" copy /y RBMK-LayoutEditor.jar "%HERE%..\..\target\RBMK-LayoutEditor.jar" >nul
+rem 随 fat jar 分发的那份：游戏会把它解到 <布局目录>\tools\ 再启动
+if exist "%HERE%..\..\src\main\resources\META-INF\RBMK-1500\tools" (
+  copy /y RBMK-LayoutEditor.jar "%HERE%..\..\src\main\resources\META-INF\RBMK-1500\tools\RBMK-LayoutEditor.jar" >nul
+)
 
 echo.
 echo OK: %HERE%RBMK-LayoutEditor.jar

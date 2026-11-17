@@ -8,9 +8,20 @@ public class MTK extends javax.swing.JPanel {
     static Color CPSONCOLOR = Color.GREEN.brighter();
     static Color CPSOFFCOLOR = Color.GREEN.darker().darker();
     static Color CHANNELOFFCOLOR; 
+    /** 干涸通道的堆芯图底色（与 Channels.FuelChannel.DRYOUT_COLOR 同色） */
+    static final Color DRYOUT_COLOR = new Color(232, 64, 32);
+
+    /* ---- 绿棒（CPS）的燃料状态三色（2026-11-02） ----
+     * 深绿 = 还没参与反应；浅绿 = 正在参与反应；灰 = 燃料消耗到接近卸料燃耗。 */
+    static final Color CPS_DARK_GREEN = new Color(0, 92, 0);
+    static final Color CPS_LIGHT_GREEN = new Color(126, 226, 126);
+    static final Color CPS_SPENT_GRAY = new Color(152, 152, 152);
+
     private short rowNumber = 0;
     private int[] fuelCPSCount = {0, 0};
     private HashMap<Channel, JTextField> channelMtkBinding;
+    /** 通道在 56×56 堆芯阵列中的坐标，供 CPS 的"区域平均"取样用 */
+    private final HashMap<Channel, int[]> channelCell = new HashMap<>();
     private boolean positive = true;
     private float threshold = 0.15f;
 
@@ -137,25 +148,20 @@ public class MTK extends javax.swing.JPanel {
         
     }
 
-    /* ==================== 中子通量图（移植自原始 jar，2026-10-18） ====================
-     * 用户要求"移植并适配原 jar 文件的图"。原始 RBMK-1500-Simulator.jar（2023-10-01 版）
-     * 的 MTK 上色逻辑（经字节码核对，CFR 反编译漏掉了均值回写那两步）：
+    /* ==================== 中子通量图（移植自原始 jar，2026-10-18；2026-11-02 改上色） ====================
+     * 原始 RBMK-1500-Simulator.jar（2023-10-01 版）的 MTK 是二值上色：
+     * 分别求燃料 / CPS 的平均中子数，正极性下 通量 > 平均×(1+阈值) 高亮、其余背景色，
+     * 负极性反过来；燃料高亮=白、背景=淡黄，CPS 高亮=亮绿、背景=暗绿。
      *
-     *   1. 分别求燃料通道与 CPS 通道的**平均**中子数；
-     *   2. 正极性：通量 > 平均×(1+阈值)  -> 高亮色，否则背景色；
-     *      负极性：通量 < 平均×(1-阈值)  -> 高亮色，否则背景色；
-     *   3. 燃料通道高亮 = uiData.UISelectedColor.brighter().brighter()（白），
-     *      背景 = CHANNELOFFCOLOR（= FuelChannel 的 uiData.UIBackgroundColor，淡黄）；
-     *      CPS 通道高亮 = CPSONCOLOR（亮绿），背景 = CPSOFFCOLOR（暗绿）。
+     * 2026-11-02 按用户定义改成连续渐变（见 update() 里的详细说明）：
+     *   · 燃料格（淡黄）按中子数量从原色渐变到白色；
+     *   · CPS 格（绿棒）显示所在区域燃料的平均状态：深绿（未参与反应）→
+     *     浅绿（正在反应）→ 灰（燃料消耗）。
+     * 阈值滑杆与正/负极性按钮保留，仍控制燃料格渐变的跨度与方向。
      *
-     * 于是堆芯图呈现：淡黄底 + 中心高通量区的白色亮块 + CPS 通道的绿点。
-     * 阈值滑杆与正/负极性按钮的语义与原始 jar 完全一致。
-     *
-     * 适配部分（保持既有修复与增强）：
-     *   · 行容器用 GridLayout(1,50) 而非 FlowLayout —— 后者在格子总宽超行内宽时会换行，
-     *     换行的格子居中沉到行底，形成地图中部的"重影方格"（早期 bug，已修）；
-     *   · 保留组件池预加载（EDT 分片）与"颜色不变则不 setBackground"的变化检测，
-     *     避免每帧对上千个组件触发重绘。
+     * 结构与性能上的既有修复保持不变：
+     *   · 行容器用 GridLayout(1,50) 而非 FlowLayout（后者会换行、形成"重影方格"）；
+     *   · 组件池预加载（EDT 分片）与"颜色不变则不 setBackground"的变化检测。
      * ================================================================================ */
 
     public void update() {
@@ -166,39 +172,109 @@ public class MTK extends javax.swing.JPanel {
         } catch (InterruptedException e) {
 
         }
-        // ---- 1. 分类求平均中子数（燃料 / CPS 分开，与原始 jar 一致） ----
-        double sumFuel = 0.0, sumCPS = 0.0;
-        int nFuel = 0, nCPS = 0;
-        for (java.util.Map.Entry<Channel, JTextField> entry : channelMtkBinding.entrySet()) {
-            Channel channel = entry.getKey();
-            if (channel instanceof FuelChannel) {
-                sumFuel += channel.getFastNeutronCount();
-                nFuel++;
-            } else if (channel instanceof CPSChannel) {
-                sumCPS += channel.getFastNeutronCount();
-                nCPS++;
+        /* ==================== 上色规则（2026-11-02 重做） ====================
+         *
+         * 原版（以及本文件此前的移植）是**二值**上色：通量高于均值×(1+阈值) 的白块，
+         * 其余淡黄；CPS 同样只有亮绿/暗绿两档。问题有两个：
+         *   1) 燃料格只有"亮/不亮"，看不出通量高低，中心区和边缘区一样是死板的两种颜色；
+         *   2) CPS 格（绿棒）原本也按通量二值上色，但它的意义应该是**所在区域的燃料状态**。
+         *
+         * 现在的规则（按用户定义）：
+         *   · 燃料格 = 中子数量，从少到多：原色（淡黄）→ 白色，连续渐变；
+         *     阈值滑杆当对比度用（跨度 S = 0.10 + 2×阈值），极性按钮翻转方向；
+         *   · CPS 格 = 该位置周围 5×5 区域内燃料通道的平均状态：
+         *       深绿  = 还没参与反应（无功率 / 新燃料）
+         *       浅绿  = 正在参与反应（按相对功率连续加深）
+         *       灰    = 燃料消耗程度（按累计比燃耗，浅绿→灰渐变）
+         *   · 干涸通道仍用红色压过一切（安全相关，优先于通量着色）。
+         * ========================================================================= */
+        final java.util.ArrayList<java.util.ArrayList<Channel>> core = NPPSim.core.coreArray;
+        final int gridN = 56;
+        final double[] activation = new double[gridN * gridN];
+        final double[] depletion = new double[gridN * gridN];
+
+        // ---- 1. 收集燃料通道的"反应程度 / 消耗程度"，并求通量均值 ----
+        double sumFuel = 0.0;
+        int nFuel = 0;
+        for (int y = 0; y < core.size() && y < gridN; y++) {
+            java.util.ArrayList<Channel> row = core.get(y);
+            for (int x = 0; x < row.size() && x < gridN; x++) {
+                Channel c = row.get(x);
+                if (c instanceof FuelChannel) {
+                    FuelChannel fc = (FuelChannel) c;
+                    sumFuel += c.getFastNeutronCount();
+                    nFuel++;
+                    activation[y * gridN + x] = fc.getActivation01();
+                    depletion[y * gridN + x] = fc.getDepletion01();
+                }
             }
         }
-        final double meanFuel = (nFuel > 0) ? sumFuel / nFuel : 0.0;
-        final double meanCPS = (nCPS > 0) ? sumCPS / nCPS : 0.0;
+        final double meanFuel = nFuel > 0 ? sumFuel / nFuel : 0.0;
         final boolean pos = positive;
-        final double hiFactor = 1.0 + threshold;   // 正极性阈值
-        final double loFactor = 1.0 - threshold;   // 负极性阈值
-        // ---- 2. 逐通道二值上色（原始 jar 逻辑） ----
+        final double thr = Math.max(1.0e-3, threshold);
+
+        // ---- 2. 逐格上色 ----
         for (java.util.Map.Entry<Channel, JTextField> entry : channelMtkBinding.entrySet()) {
             Channel channel = entry.getKey();
             JTextField light = entry.getValue();
-            double flux = channel.getFastNeutronCount();
             java.awt.Color desired;
             if (channel instanceof FuelChannel) {
-                boolean lit = pos ? (flux > meanFuel * hiFactor)
-                                  : (flux < meanFuel * loFactor);
-                desired = lit ? channel.uiData.UISelectedColor.brighter().brighter()
-                              : CHANNELOFFCOLOR;
+                FuelChannel fc = (FuelChannel) channel;
+                if (fc.isDryout()) {
+                    desired = DRYOUT_COLOR;
+                } else if (meanFuel <= 0.0) {
+                    desired = CHANNELOFFCOLOR;
+                } else {
+                    /* 渐变跨度 S：均值 ±S 映射到 0..1。
+                     * 阈值滑杆（0.005~0.25）在这里当"对比度"用：S = 0.10 + 2×阈值，
+                     * 默认 0.15 → S=0.40。直接用阈值本身（±0.15）的话，径向功率形状
+                     * （0.55~1.45）只有中间很窄一圈落在渐变带里，中心会糊成一大片纯白，
+                     * 看上去仍是原来的二值图。 */
+                    double span = 0.10 + 2.0 * thr;
+                    double t = (channel.getFastNeutronCount() / meanFuel - (1.0 - span)) / (2.0 * span);
+                    t = Math.max(0.0, Math.min(1.0, t));
+                    if (!pos) {
+                        t = 1.0 - t;   // 负极性：低通量反而更亮（与原版极性语义一致）
+                    }
+                    desired = blend(CHANNELOFFCOLOR, java.awt.Color.WHITE, t);
+                }
             } else if (channel instanceof CPSChannel) {
-                boolean lit = pos ? (flux > meanCPS * hiFactor)
-                                  : (flux < meanCPS * loFactor);
-                desired = lit ? CPSONCOLOR : CPSOFFCOLOR;
+                int[] xy = channelCell.get(channel);
+                double act = Double.NaN, dep = Double.NaN;
+                if (xy != null) {
+                    double sa = 0.0, sd = 0.0;
+                    int n = 0;
+                    for (int dy = -2; dy <= 2; dy++) {
+                        int yy = xy[1] + dy;
+                        if (yy < 0 || yy >= gridN || yy >= core.size()) {
+                            continue;
+                        }
+                        for (int dx = -2; dx <= 2; dx++) {
+                            int xx = xy[0] + dx;
+                            if (xx < 0 || xx >= gridN || xx >= core.get(yy).size()) {
+                                continue;
+                            }
+                            int idx = yy * gridN + xx;
+                            Channel nb = core.get(yy).get(xx);
+                            if (nb instanceof FuelChannel) {
+                                sa += activation[idx];
+                                sd += depletion[idx];
+                                n++;
+                            }
+                        }
+                    }
+                    if (n > 0) {
+                        act = sa / n;
+                        dep = sd / n;
+                    }
+                }
+                if (Double.isNaN(act)) {
+                    act = 0.0;
+                    dep = 0.0;
+                }
+                // 深绿（未参与反应）→ 浅绿（正在反应）→ 灰（燃料消耗）
+                java.awt.Color reacting = blend(CPS_DARK_GREEN, CPS_LIGHT_GREEN, act);
+                desired = blend(reacting, CPS_SPENT_GRAY, dep);
             } else {
                 continue;
             }
@@ -206,6 +282,20 @@ public class MTK extends javax.swing.JPanel {
                 light.setBackground(desired);
             }
         }
+    }
+
+    /** 线性混色，t 夹在 0..1 */
+    private static java.awt.Color blend(java.awt.Color a, java.awt.Color b, double t) {
+        if (t <= 0.0) {
+            return a;
+        }
+        if (t >= 1.0) {
+            return b;
+        }
+        return new java.awt.Color(
+                (int) Math.round(a.getRed() + (b.getRed() - a.getRed()) * t),
+                (int) Math.round(a.getGreen() + (b.getGreen() - a.getGreen()) * t),
+                (int) Math.round(a.getBlue() + (b.getBlue() - a.getBlue()) * t));
     }
 
     private javax.swing.JPanel createRow() {
@@ -224,6 +314,7 @@ public class MTK extends javax.swing.JPanel {
             if (currentChannel instanceof FuelChannel || currentChannel instanceof CPSChannel) {
                 javax.swing.JTextField button = takeCell();
                 channelMtkBinding.put(currentChannel, button);
+                channelCell.put(currentChannel, new int[] {i + 2, 50 - rowNumber + 2});
                 button.setBorder(javax.swing.BorderFactory.createLineBorder(CHANNELOFFCOLOR.darker(), 1));
                 if (currentChannel instanceof FuelChannel) {
                     button.setBackground(currentChannel.uiData.UIBackgroundColor);

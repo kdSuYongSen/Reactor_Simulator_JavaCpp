@@ -38,6 +38,10 @@ final class PageLayout {
     /** 供各页面共用的内容缩放器（内部按组件缓存原始字号） */
     private static final PanelContentScaler SCALER = new PanelContentScaler();
     /** 方块内部被切成绝对布局后，原来的 LayoutManager 与各子组件默认 bounds */
+    /** 被布局文件设过颜色的组件 → {bg, fg}：再保存时要把颜色继续写下去（2026-11-16） */
+    private static final Map<java.awt.Component, String[]> COLORED =
+            new java.util.WeakHashMap<>();
+
     /** 被"布局工具"接管过布局的容器 → 原 LayoutManager（身份比较，任意深度） */
     private static final Map<Container, LayoutManager> takenLayout =
             new java.util.IdentityHashMap<>();
@@ -141,7 +145,18 @@ final class PageLayout {
          * 结果是 blocks=0、host=null，工具页里该窗口"什么都选不到"。
          * （实测：NPPSim 构造时会先建一个同 id 窗口，用户再开一个就把登记项换成空页面。） */
         javax.swing.SwingUtilities.invokeLater(() -> {
-            javax.swing.Timer once = new javax.swing.Timer(350, ev -> {
+            /* 2026-11-13：**等窗口真正显示出来再初始化**。
+             * 旧实现在 350 ms 时不管窗口是否已显示就开始记录"默认坐标"：
+             * 若那一刻窗口还没 displayable（新建窗口、或构造耗时超过 350 ms），
+             * 子组件的宽高还是 0，fallback 记成空 —— 之后"恢复默认布局"没有坐标可回，
+             * 缩放也拿不到原始尺寸。实测电网/柴油窗口一开就调布局会落到这条路径上。 */
+            final int[] waits = {0};
+            javax.swing.Timer once = new javax.swing.Timer(350, null);
+            once.addActionListener(ev -> {
+                if (!page.frame.isDisplayable() && waits[0] < 20) {
+                    waits[0]++;
+                    return;                     // 还没显示，下一拍再看（最多再等 7 s）
+                }
                 if (page.blocks.isEmpty() && page.managed) {
                     page.blocks.putAll(discover(page.frame));
                 }
@@ -150,12 +165,13 @@ final class PageLayout {
                             + Integer.toHexString(System.identityHashCode(page))
                             + " blocks=" + page.blocks.size()
                             + " frame=" + Integer.toHexString(System.identityHashCode(page.frame))
-                            + " displayable=" + page.frame.isDisplayable());
+                            + " displayable=" + page.frame.isDisplayable()
+                            + " waits=" + waits[0]);
                 }
                 initialize(page);
-                ((javax.swing.Timer) ev.getSource()).stop();
+                once.stop();
             });
-            once.setRepeats(false);
+            once.setRepeats(true);
             once.start();
         });
         startPolling();
@@ -230,6 +246,21 @@ final class PageLayout {
             }
             out.put(String.valueOf(i), (JComponent) comp);
         }
+        /* 2026-11-16：整页就是一个自绘画布时（全厂总图 PlantOverviewUI），
+         * 逐层下钻会一路钻到那个画布本身，它是叶子容器 —— 结果一个方块都收不到，
+         * 工具页里这一页"什么都选不到"。这里把它本身作为唯一方块收进来。 */
+        if (out.isEmpty()) {
+            Component leaf = c;
+            if (c instanceof javax.swing.JScrollPane) {
+                javax.swing.JViewport vp = ((javax.swing.JScrollPane) c).getViewport();
+                if (vp != null && vp.getView() instanceof JComponent) {
+                    leaf = vp.getView();        // 取到真正的画布，而不是滚动容器
+                }
+            }
+            if (leaf instanceof JComponent) {
+                out.put("0", (JComponent) leaf);
+            }
+        }
         return out;
     }
 
@@ -242,7 +273,11 @@ final class PageLayout {
             return;
         }
         pollTimer = new javax.swing.Timer(1000, ev -> {
-            for (Page p : PAGES) {
+            /* 用快照遍历（2026-11-04）：窗口/页面是陆续注册进来的，直接在 PAGES 上迭代会
+             * 撞上 ConcurrentModificationException（实测冷启动时 EDT 抛过一次），
+             * 那一秒钟的布局刷新就整个断掉。 */
+            java.util.List<Page> snapshot = new java.util.ArrayList<>(PAGES);
+            for (Page p : snapshot) {
                 if (p.managed) {
                     refresh(p);
                 }
@@ -320,8 +355,10 @@ final class PageLayout {
                 continue;
             }
             UiLayoutFile.Entry b = e.getValue();
+            try {
             c.setBounds(b.x, b.y, b.w, b.h);
             c.setVisible(b.visible);
+            applyColors(c, b.bg, b.fg);          // 2026-11-16：颜色（可选字段）
             java.awt.Rectangle design = page.fallback.get(e.getKey());
             if (design != null && design.width > 0 && design.height > 0) {
                 double s = PanelContentScaler.scaleFor(design.width, design.height, b.w, b.h);
@@ -346,6 +383,7 @@ final class PageLayout {
                                 k.getValue().w > 0 ? k.getValue().w : child.getWidth(),
                                 k.getValue().h > 0 ? k.getValue().h : child.getHeight()),
                                 k.getValue().visible);
+                        applyColors(child, k.getValue().bg, k.getValue().fg);
                     }
                 }
             }
@@ -368,6 +406,7 @@ final class PageLayout {
                                 k.x, k.y,
                                 k.w > 0 ? k.w : t.getWidth(),
                                 k.h > 0 ? k.h : t.getHeight()), k.visible);
+                        applyColors(t, k.bg, k.fg);
                         if (Boolean.getBoolean("layout.debug")) {
                             System.out.println("[layout]   节点 " + path + " → "
                                     + t.getClass().getSimpleName() + " " + t.getBounds());
@@ -377,9 +416,18 @@ final class PageLayout {
                     }
                 }
             }
+            } catch (RuntimeException ex) {
+                /* 单个方块出问题不能连累整轮（2026-11-03）：旧实现一处抛异常，
+                 * 后面的方块全部不摆，表现就是"某些组件位置改不动"。 */
+                System.out.println("[Layout] " + page.id + " 方块 " + e.getKey()
+                        + " 应用失败（已跳过）: " + ex);
+            }
         }
         root.revalidate();
         root.repaint();
+        /* 应用完刷新页面清单（2026-11-03）：清单原来只在窗口创建时导出一次，
+         * 编辑过的位置编辑器看不到，再保存就会按旧快照把位置写回去。 */
+        dumpManifest();
     }
 
     // ------------------------------------------------------------------
@@ -502,6 +550,68 @@ final class PageLayout {
      * 父链上凡是还没被接管的容器逐个接管（从里到外），因此既能动顶层面板，
      * 也能动"面板 → 子面板 → 按键"这种三层嵌套里的按键（旧接口只能动第一层）。
      */
+    /**
+     * 应用布局文件里的背景/前景色（2026-11-16）。
+     *
+     * <p>背景色要同时把组件设为不透明，否则 {@code JPanel}/{@code JLabel} 默认透明，
+     * 设了颜色也看不见。</p>
+     */
+    static void applyColors(java.awt.Component c, String bg, String fg) {
+        if (c == null) {
+            return;
+        }
+        if (bg != null || fg != null) {
+            COLORED.put(c, new String[]{bg, fg});
+        }
+        if (bg != null) {
+            java.awt.Color col = parseColor(bg);
+            if (col != null) {
+                c.setBackground(col);
+                if (c instanceof javax.swing.JComponent) {
+                    ((javax.swing.JComponent) c).setOpaque(true);
+                }
+            }
+        }
+        if (fg != null) {
+            java.awt.Color col = parseColor(fg);
+            if (col != null) {
+                c.setForeground(col);
+            }
+        }
+    }
+
+    /** "#RRGGBB" / "#AARRGGBB" / "RRGGBB" → Color；非法返回 null */
+    static java.awt.Color parseColor(String text) {
+        if (text == null) {
+            return null;
+        }
+        String t = text.trim().replace("0x", "").replace("#", "");
+        try {
+            if (t.length() == 6) {
+                return new java.awt.Color(Integer.parseInt(t, 16));
+            }
+            if (t.length() == 8) {                    // AARRGGBB
+                long v = Long.parseLong(t, 16);
+                return new java.awt.Color((int) ((v >> 16) & 0xFF), (int) ((v >> 8) & 0xFF),
+                        (int) (v & 0xFF), (int) ((v >> 24) & 0xFF));
+            }
+        } catch (RuntimeException ignored) {
+            // 输入一半的非法值：忽略
+        }
+        return null;
+    }
+
+    /** Color → "#RRGGBB"（带透明度时输出 8 位） */
+    static String hexOf(java.awt.Color c) {
+        if (c == null) {
+            return null;
+        }
+        if (c.getAlpha() < 255) {
+            return String.format("#%02X%02X%02X%02X", c.getAlpha(), c.getRed(), c.getGreen(), c.getBlue());
+        }
+        return String.format("#%02X%02X%02X", c.getRed(), c.getGreen(), c.getBlue());
+    }
+
     static void applyNode(Page page, java.awt.Component target, java.awt.Rectangle r,
                           boolean visible) {
         if (page == null || target == null) {
@@ -641,6 +751,7 @@ final class PageLayout {
             if (!comps[i].isVisible()) {
                 k.put("visible", false);
             }
+            putSavedColors(k, comps[i]);
             String path = prefix.isEmpty() ? String.valueOf(i) : prefix + "/" + i;
             if (prefix.isEmpty()) {
                 kids.put(String.valueOf(i), k);
@@ -677,6 +788,7 @@ final class PageLayout {
                 if (!c.isVisible()) {
                     b.put("visible", false);
                 }
+                putSavedColors(b, c);
                 org.json.JSONObject kids = new org.json.JSONObject();
                 org.json.JSONObject nodes = new org.json.JSONObject();
                 collectDeep(c, "", c, kids, nodes);
@@ -696,6 +808,20 @@ final class PageLayout {
             System.out.println("[Layout] 已保存 " + page.file.getName());
         } catch (Exception ex) {
             System.out.println("[Layout] 保存失败 " + page.id + ": " + ex);
+        }
+    }
+
+    /** 保存布局时把"曾经设过"的颜色接着写下去（没设过的组件不写，避免固化主题色） */
+    private static void putSavedColors(org.json.JSONObject o, java.awt.Component c) {
+        String[] col = COLORED.get(c);
+        if (col == null) {
+            return;
+        }
+        if (col[0] != null) {
+            o.put("bg", col[0]);
+        }
+        if (col[1] != null) {
+            o.put("fg", col[1]);
         }
     }
 
@@ -760,6 +886,7 @@ final class PageLayout {
             k.put("w", comps[i].getWidth());
             k.put("h", comps[i].getHeight());
             k.put("visible", comps[i].isVisible());
+            putColors(k, comps[i]);
             org.json.JSONArray grand = manifestChildren(comps[i], depth + 1, count);
             if (grand.length() > 0) {
                 k.put("children", grand);
@@ -770,6 +897,29 @@ final class PageLayout {
     }
 
     /** 组件上能显示的文字（按钮文字 / 标签文字 / 名字），给外部编辑器当节点名 */
+    /**
+     * 把组件的背景/前景色写进清单（2026-11-16），供布局编辑器显示"当前颜色"。
+     *
+     * <p>只是给编辑器当默认值用；编辑器只有在你真改了颜色时才写回布局文件，
+     * 所以不会把 LAF 的默认色固化下来。</p>
+     */
+    private static void putColors(org.json.JSONObject o, java.awt.Component c) {
+        if (c == null) {
+            return;
+        }
+        String bg = hexOf(c.getBackground());
+        if (bg != null) {
+            o.put("bg", bg);
+        }
+        if (c instanceof javax.swing.JLabel || c instanceof javax.swing.AbstractButton
+                || c instanceof javax.swing.text.JTextComponent) {
+            String fg = hexOf(c.getForeground());
+            if (fg != null) {
+                o.put("fg", fg);
+            }
+        }
+    }
+
     static String labelOfComponent(java.awt.Component c) {
         String text = null;
         if (c instanceof javax.swing.AbstractButton) {
@@ -822,6 +972,7 @@ final class PageLayout {
                     b.put("h", c.getHeight() > 0 ? c.getHeight() : c.getPreferredSize().height);
                     b.put("cls", c.getClass().getSimpleName());
                     b.put("visible", c.isVisible());
+                    putColors(b, c);
                     // 递归子组件：外部布局编辑器（RBMK-LayoutEditor.jar / python 工具）靠它列到任意层级
                     org.json.JSONArray kids = manifestChildren(c, 1, new int[]{0});
                     if (kids.length() > 0) {
@@ -833,8 +984,54 @@ final class PageLayout {
                 pg.put("blocks", blocksArr);
                 pagesArr.put(pg);
             }
-            rootObj.put("pages", pagesArr);
+            /* 2026-11-13：把上一次清单里**没在本进程注册**的页面原样带过来。
+             * 电网 / 柴油机 / 全厂总图这些窗口是按需打开的，只导出"当前已注册"的页面会导致
+             * 外部布局编辑器重启后看不到它们（用户反馈"工具调不到这些面板"）。
+             * 条目保留的是上次运行时的结构，编辑器仍可据此编辑；
+             * 真正打开窗口时 register() 会覆盖成实时数据。 */
             File out = new File(dir(), "ui_layout_pages.json");
+            try {
+                if (out.isFile()) {
+                    JSONObject prev = new JSONObject(new String(
+                            Files.readAllBytes(out.toPath()), StandardCharsets.UTF_8));
+                    JSONArray prevPages = prev.optJSONArray("pages");
+                    if (prevPages != null) {
+                        java.util.Set<String> live = new java.util.HashSet<>();
+                        for (int i = 0; i < pagesArr.length(); i++) {
+                            live.add(pagesArr.getJSONObject(i).optString("id"));
+                        }
+                        for (int i = 0; i < prevPages.length(); i++) {
+                            JSONObject pg = prevPages.getJSONObject(i);
+                            String id = pg.optString("id");
+                            if (!live.contains(id)) {
+                                pg.put("stale", true);      // 标记：本进程未打开，结构来自上次
+                                pagesArr.put(pg);
+                                continue;
+                            }
+                            /* 本进程里"已注册但还没枚举完方块"（窗口没显示 / 350 ms 定时器未到）
+                             * 的页面会是 0 块，直接写出去会把上一次的完整结构抹掉。
+                             * 这种情况沿用旧结构，并标 stale。 */
+                            JSONArray prevBlocks = pg.optJSONArray("blocks");
+                            if (prevBlocks == null || prevBlocks.length() == 0) {
+                                continue;
+                            }
+                            for (int j = 0; j < pagesArr.length(); j++) {
+                                JSONObject now = pagesArr.getJSONObject(j);
+                                if (id.equals(now.optString("id"))
+                                        && (now.optJSONArray("blocks") == null
+                                            || now.optJSONArray("blocks").length() == 0)) {
+                                    pg.put("stale", true);
+                                    pagesArr.put(j, pg);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // 旧文件损坏就只写本次的页面
+            }
+            rootObj.put("pages", pagesArr);
             Files.write(out.toPath(), rootObj.toString(2).getBytes(StandardCharsets.UTF_8));
             manifestDumped = true;
         } catch (Exception e) {

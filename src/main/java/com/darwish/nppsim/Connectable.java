@@ -171,7 +171,7 @@ class DwTankDrainValve extends WaterValve {
         drain.updateWaterInflow(timestepFlow, source.getWaterTemperature());
     }
 }
-
+    
 class SteamValve extends Component {
     private final double cV; // Cv cumber of valve
     final Connectable source, drain;
@@ -304,6 +304,18 @@ class Pump extends Component { //TODO will need refactoring after water flow get
     protected double currentHead = 0; //current head as determined by rpm
     protected double npsha = 0;
     protected double flow = 0.0, flowRate = 0.0;// flow in kg/s NOTE converted from m3/s, flow per timestep = flow * 0.05
+    /**
+     * 母管指派的每 tick 输送量 kg（-1 = 没有指派，用泵自身的流量式）。
+     *
+     * <p>泵本身按转速×额定流量算出来的只是"零扬程流量"，与下游到底要多少无关。
+     * 给水泵 7 台全速 = 6 600 kg/s，而汽包只要 2 000 —— 多出来的 4 600 kg/s
+     * 直接进了压力母管，母管不存水（waterMass 恒为 0），这部分水就凭空消失了：
+     * 除氧器被抽干到 −64 %，而给水流量表却一直显示 6 400。</p>
+     *
+     * <p>压力母管每 tick 已经按下游阀的实际消耗算好每个泵该出多少
+     * （{@code PressureHeader.update()} 里的 pressureSum 分配），这里把它接上。</p>
+     */
+    protected double assignedTick = -1.0;
     protected double timestepFlow = 0.0;
     protected double waterTemp = 20.0;
     protected boolean isCavitating = false;
@@ -369,7 +381,12 @@ class Pump extends Component { //TODO will need refactoring after water flow get
             isCavitating = false;
         }
         currentHead = (Math.pow(rpm, 2) * (head / Math.pow(ratedRPM, 2)) + (rpm == 0 ? 0 : source.getPressure())) * dischargeValve.position;
-        flow = ((rpm / ratedRPM) * ratedFlow) / source.getWaterDensity() * 0.05 * dischargeValve.position;
+        /* 流量口径与 MCCPump 对齐（2026-11-02）：这里返回 **kg/s**（原来是 kg/tick，
+         * 少了 20 倍）。PressureHeader 用 getFlow() 计算母管"零扬程流量"，
+         * 拿 kg/tick 去和 kg/s 的额定值比，会把给水母管的压力算成 1 MPa 左右
+         * （实测 1.08 MPa），而给水泵的关死扬程是 8.9 MPa ——
+         * 结果给水阀根本没有足够压差把水推进入口压力 4 MPa 的换热器。 */
+        flow = ((rpm / ratedRPM) * ratedFlow) / source.getWaterDensity() * dischargeValve.position;
         if (Double.isNaN(flow)) {
             flow = 0.0;
         }
@@ -381,6 +398,44 @@ class Pump extends Component { //TODO will need refactoring after water flow get
         }
         if (source.getWaterMass() < flow) {
             flow = source.getWaterMass();
+        }
+        /* ---------------------------------------------------------------
+         * 2026-11-02：补上缺失的"每 tick 输水量"赋值。
+         *
+         * 旧代码从头到尾**没有给 timestepFlow 赋过值**（一直是 0），
+         * 于是所有非主泵的泵（凝结水泵、给水泵、ADMS 补水泵、循环水泵……）
+         * 都只算出了压头和流量读数，却一滴水也没真正搬过去：
+         *   · 热井 → 凝结水联箱 不过水 → 联箱压力只有 0.12 MPa
+         *   · 凝结水 → 除氧器 不过水 → 除氧器水位一路掉
+         *   · 除氧器 → 给水泵 → 给水母管 → 换热器 不过水 → 二次侧永不产汽
+         * 表现就是"泵在转、电流有、压头有，但流量恒为 0"，整条二回路是死的。
+         *
+         * 写法与 MCCPump 保持一致：flow 是 kg/s，乘 0.05 得到每 tick 的 kg。
+         * 原来这里从头到尾没有赋值，所以二回路的泵"有压头、有电流、没流量"。
+         * --------------------------------------------------------------- */
+        timestepFlow = flow * 0.05;      // kg/s → 每 tick（50 ms）的 kg
+        /* 母管指派优先（2026-11-04）：下游阀要多少就给多少，不能按"泵自己有多少"
+         * 硬灌进母管（母管不存水，多余的部分会凭空消失）。
+         *
+         * 但必须留一个**最小流量**：压力母管本身不存水，泵一旦被压到 0，
+         * 母管压力就掉到大气压 → 给水阀没有压差 → 流量 0 → 指派永远是 0，
+         * 整条给水链自己把自己锁死（实测标准工况 10 s 后给水 0、堆芯掉到 300 MW）。
+         * 真实机组给水泵也带再循环，不会真的打到 0。 */
+        if (assignedTick >= 0.0) {
+            double floorTick = Math.max(assignedTick, timestepFlow * 0.05);
+            if (timestepFlow > floorTick) {
+                timestepFlow = floorTick;
+                flow = timestepFlow * 20.0;
+            }
+        }
+        /* 源端可供量限流（2026-11-04）：热井、除氧器这类"有底"的水源不能被无限抽。
+         * 凝结水泵 3×949 kg/s 全开抽热井，而凝结水只有几百 kg/s → 热井被抽成负水位。 */
+        if (source instanceof WaterSupplyLimit) {
+            double avail = ((WaterSupplyLimit) source).availableWaterKg();
+            if (timestepFlow > avail) {
+                timestepFlow = Math.max(0.0, avail);
+                flow = timestepFlow * 20.0;      // 读数口径同步
+            }
         }
         source.updateWaterOutflow(timestepFlow, waterTemp);
         drain.updateWaterInflow(timestepFlow, waterTemp);
@@ -427,6 +482,11 @@ class Pump extends Component { //TODO will need refactoring after water flow get
 
     public void updateFlow(double flow) {
         timestepFlow = flow;
+    }
+
+    /** 母管指派本 tick 的输送量 kg（下一 tick 生效）；传负值解除 */
+    void assignFlow(double tickKg) {
+        assignedTick = tickKg;
     }
     
     public void setSetPoint(float setPoint) {

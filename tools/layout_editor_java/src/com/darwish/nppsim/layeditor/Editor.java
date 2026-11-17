@@ -34,6 +34,7 @@ import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JScrollBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
 import javax.swing.JSplitPane;
@@ -42,7 +43,9 @@ import javax.swing.JTextArea;
 import javax.swing.JTree;
 import javax.swing.KeyStroke;
 import javax.swing.SpinnerNumberModel;
+import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.JViewport;
 import javax.swing.event.TreeSelectionEvent;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
@@ -68,9 +71,31 @@ public final class Editor extends JFrame {
     private final Canvas canvas = new Canvas();
     private final JSpinner spX = spin(), spY = spin(), spW = spin(), spH = spin();
     private final JCheckBox cbVisible = new JCheckBox(L.t("lbl.visible"));
+    /* 颜色（2026-11-16）：预览块 + 十六进制输入框，点预览块打开调色盘 */
+    private final javax.swing.JTextField txBg = new javax.swing.JTextField(7);
+    private final javax.swing.JTextField txFg = new javax.swing.JTextField(7);
+    private final ColorChip swBg = new ColorChip();
+    private final ColorChip swFg = new ColorChip();
     private final JLabel status = new JLabel(" ");
     private final JLabel pathLabel = new JLabel(" ");
     private final JLabel hint = new JLabel(L.t("hint.canvas"));
+    /** 画布的滚动容器（面板比窗口大时出滚动条，右侧内容不再被截掉） */
+    private JScrollPane canvasScroll;
+    /** 当前缩放比例显示（100% = 模型像素 1:1） */
+    private JLabel zoomLabel;
+    /** 长按热键时的纯放大镜（盖在玻璃面板上，不改变页面缩放） */
+    private final Loupe loupe = new Loupe();
+    /** 放大镜倍率显示（− / + 中间那个数字） */
+    private JLabel loupeLabel;
+
+    /**
+     * 缩放倍率范围（相对 1:1 模型像素）。
+     *
+     * <p>上限是 1.0：画布<b>永远不放大</b>（页面自己变大会让人分不清是在看布局还是在放大镜里）。
+     * 想看细节请按住热键用放大镜；这里只允许缩小，方便大面板一屏看全。</p>
+     */
+    static final double ZOOM_MIN = 0.15;
+    static final double ZOOM_MAX = 1.0;
 
     /** 左侧树 / 右侧画布的分隔条（显示后要显式给位置，否则只按树的极小首选宽度分） */
     private JSplitPane split;
@@ -90,6 +115,8 @@ public final class Editor extends JFrame {
      */
     private final java.util.IdentityHashMap<Manifest.Node, DefaultMutableTreeNode> treeNodes =
             new java.util.IdentityHashMap<>();
+    /** 已经叠过磁盘布局的页面（同一页只叠一次，避免覆盖未保存的拖动） */
+    private final java.util.Set<String> layoutApplied = new java.util.HashSet<>();
 
     public Editor(Manifest manifest) {
         super(L.t("app.title"));
@@ -100,6 +127,17 @@ public final class Editor extends JFrame {
         setSize(1180, 760);
         setMinimumSize(new Dimension(900, 600));
         setLocationRelativeTo(null);
+
+        // 放大镜挂在玻璃面板上：平时不可见，按住热键才出现，不影响任何点击
+        setGlassPane(loupe);
+        loupe.setVisible(false);
+        // 万一按住时窗口失去焦点（切到别的程序），松开事件收不到，这里兜底撤掉
+        addWindowFocusListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowLostFocus(java.awt.event.WindowEvent e) {
+                magnifyHeld = false;     // 松开事件丢了，状态位也得跟着清
+                loupe.hideLoupe();
+            }
+        });
 
         buildUi();
         loadPages();
@@ -140,9 +178,14 @@ public final class Editor extends JFrame {
             }
         });
 
+        JButton settingsBtn = new JButton(L.t("btn.settings"));
+        settingsBtn.setToolTipText(L.t("keys.title"));
+        settingsBtn.addActionListener(e -> openKeySettings());
+
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         right.add(new JLabel(L.t("lbl.language")));
         right.add(langCombo);
+        right.add(settingsBtn);
         right.add(help);
         right.add(reload);
         top.add(right, BorderLayout.EAST);
@@ -160,7 +203,20 @@ public final class Editor extends JFrame {
         // ---- 右：画布 ----
         JPanel canvasWrap = new JPanel(new BorderLayout());
         canvasWrap.setBorder(BorderFactory.createTitledBorder(L.t("canvas.title")));
-        canvasWrap.add(canvas, BorderLayout.CENTER);
+
+        /* 画布套一层滚动容器（2026-11-03）：面板比视口大时（比如 1600×1800 的窗口）
+         * 原来右侧/下侧内容直接被裁掉看不见，现在可以用滚动条看全。 */
+        canvasScroll = new JScrollPane(canvas,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        canvasScroll.setBorder(null);
+        canvasScroll.getViewport().setBackground(canvas.getBackground());
+        canvasScroll.getVerticalScrollBar().setUnitIncrement(32);
+        canvasScroll.getHorizontalScrollBar().setUnitIncrement(32);
+        canvas.setScroll(canvasScroll);
+        canvasWrap.add(canvasScroll, BorderLayout.CENTER);
+        canvasWrap.add(buildZoomBar(), BorderLayout.NORTH);
+
         JLabel canvasHint = new JLabel(hintText());
         canvasHint.setBorder(BorderFactory.createEmptyBorder(2, 6, 0, 6));
         canvasWrap.add(canvasHint, BorderLayout.SOUTH);
@@ -209,6 +265,10 @@ public final class Editor extends JFrame {
                 doSave();
             }
         });
+        /* 缩放 / 长按放大热键（2026-11-03）：按键从 <布局目录>/ui_zoom_keys.json 读，
+         * 和模拟器共用同一份 —— 在"设置…"里改，两边一起变。 */
+        applyZoomKeys();
+
         // Ctrl+R：重新读取模拟器导出的清单
         getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke(KeyEvent.VK_R, InputEvent.CTRL_DOWN_MASK), "reload");
@@ -225,6 +285,178 @@ public final class Editor extends JFrame {
                 showHelp();
             }
         });
+    }
+
+    /** 已经装上的缩放热键（改绑前先撤掉） */
+    private final java.util.List<KeyStroke> zoomStrokes = new java.util.ArrayList<>();
+
+    /**
+     * 放大键是否还按着（2026-11-03 晚）。
+     *
+     * <p>按住不放时系统会不停发 keyPressed（自动重复）。靠这个状态位做到
+     * "上一次还没松开就不执行"：不会反复重渲染快照，也不会在按住放大键的同时
+     * 又响应倍率 / 适应性快捷键。</p>
+     */
+    private boolean magnifyHeld;
+
+    /** 按当前配置重建缩放/放大热键 */
+    private void applyZoomKeys() {
+        javax.swing.InputMap im = getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
+        javax.swing.ActionMap am = getRootPane().getActionMap();
+        for (KeyStroke ks : zoomStrokes) {
+            im.remove(ks);
+        }
+        zoomStrokes.clear();
+
+        ZoomKeys k = ZoomKeys.load(dir);
+        loupe.setFactor(k.loupe);
+        updateLoupeLabel();
+        magnifyHeld = false;          // 重新绑定后当没按过
+        /* "放大/缩小"热键改调放大镜倍率（2026-11-03 晚）：页面本身不再有"放大"这回事，
+         * 否则一按键整个版面就变大，看着像自己放大了。0 仍然是"适应窗口"。
+         * 放大键还按着的时候这几个都不响应（见下面 showLoupe 的说明）。 */
+        bindZoom(im, am, KeyStroke.getKeyStroke(k.zoomIn, 0), () -> {
+            if (!magnifyHeld) {
+                changeLoupeFactor(+0.25);
+            }
+        }, true);
+        bindZoom(im, am, KeyStroke.getKeyStroke(k.zoomOut, 0), () -> {
+            if (!magnifyHeld) {
+                changeLoupeFactor(-0.25);
+            }
+        }, true);
+        bindZoom(im, am, KeyStroke.getKeyStroke(k.fit, 0), () -> {
+            if (!magnifyHeld) {
+                canvas.fitView();
+            }
+        }, true);
+        /* 长按热键 = 纯放大镜：只把鼠标周围那块放大，页面缩放和滚动位置都不动。 */
+        bindZoom(im, am, KeyStroke.getKeyStroke(k.magnify, 0), this::showLoupe, true);
+        // 松开的处理不检查焦点：按住时就算焦点跑进输入框也要能撤掉放大镜
+        bindZoom(im, am, KeyStroke.getKeyStroke(k.magnify, 0, true),
+                () -> {
+                    magnifyHeld = false;
+                    loupe.hideLoupe();
+                }, false);
+    }
+
+    /** 按住热键：在鼠标位置显示放大镜（倍率取配置里的固定值） */
+    private void showLoupe() {
+        /* 上一个快捷键还没松开就不执行（2026-11-03 晚）：按住不放时系统会一直发
+         * keyPressed（自动重复），以前每次都要重新渲染一张快照，画面会抖、也费 CPU。
+         * 这里用状态位挡住，一次按住只放大一次。 */
+        if (magnifyHeld) {
+            return;
+        }
+        magnifyHeld = true;
+        loupe.setFactor(ZoomKeys.load(dir).loupe);
+        java.awt.PointerInfo pi = java.awt.MouseInfo.getPointerInfo();
+        loupe.showAt(pi == null ? null : pi.getLocation());
+    }
+
+    /** 调整放大镜倍率（NaN = 复位成默认 2.5）并写回共用配置 */
+    private void changeLoupeFactor(double delta) {
+        ZoomKeys k = ZoomKeys.load(dir);
+        double f = Double.isNaN(delta) ? 2.5 : k.loupe + delta;
+        f = Math.max(Loupe.MIN, Math.min(Loupe.MAX, f));
+        k.loupe = f;
+        k.save(dir);                 // 模拟器读同一份文件，下次按住就是新倍率
+        loupe.setFactor(f);          // 正在按住时只重画，不重新抓图
+        updateLoupeLabel();
+    }
+
+    private void updateLoupeLabel() {
+        if (loupeLabel != null) {
+            loupeLabel.setText(String.format("%.1f×", loupe.getFactor()));
+        }
+    }
+
+    private void bindZoom(javax.swing.InputMap im, javax.swing.ActionMap am, KeyStroke ks,
+                          Runnable action, boolean respectTextFocus) {
+        String name = "zoom" + ks.toString().hashCode();
+        im.put(ks, name);
+        am.put(name, new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                if (respectTextFocus && textFocused()) {
+                    return;
+                }
+                action.run();
+            }
+        });
+        zoomStrokes.add(ks);
+    }
+
+    /** 打开热键设置；确定后写盘并立刻生效 */
+    private void openKeySettings() {
+        ZoomKeys cur = ZoomKeys.load(dir);
+        ZoomKeys next = KeyBindDialog.show(this, cur, dir);
+        if (next == null) {
+            return;
+        }
+        next.save(dir);
+        applyZoomKeys();
+        status.setText(L.t("keys.title"));
+    }
+
+    /** 画布上方的工具条：比例 / 适应窗口 ｜ 放大镜倍率 − / 倍率 / + */
+    private JPanel buildZoomBar() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
+        bar.setOpaque(false);
+
+        zoomLabel = new JLabel("100%");
+        zoomLabel.setPreferredSize(new Dimension(48, 20));
+        zoomLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        zoomLabel.setToolTipText(L.t("zoom.label"));
+
+        JButton fit = new JButton(L.t("zoom.fit"));
+        fit.setToolTipText(L.t("zoom.fit.tip"));
+        fit.addActionListener(e -> canvas.fitView());
+
+        /* 放大镜倍率（2026-11-03）：长按热键是"纯放大镜"，页面本身永不放大，
+         * 要放大只能靠这里调倍率。改完写进共用的 ui_zoom_keys.json。 */
+        JLabel sep = new JLabel("│");
+        sep.setForeground(new Color(0x80, 0x86, 0x90));
+
+        JButton lout = new JButton("−");
+        lout.setMargin(new Insets(0, 6, 0, 6));
+        lout.setToolTipText(L.t("zoom.loupe.out"));
+        lout.addActionListener(e -> changeLoupeFactor(-0.25));
+
+        loupeLabel = new JLabel("2.5×");
+        loupeLabel.setPreferredSize(new Dimension(52, 20));
+        loupeLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        loupeLabel.setToolTipText(L.t("zoom.loupe.tip"));
+        loupeLabel.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+        loupeLabel.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                changeLoupeFactor(Double.NaN);      // 点数字复位
+            }
+        });
+
+        JButton lin = new JButton("+");
+        lin.setMargin(new Insets(0, 6, 0, 6));
+        lin.setToolTipText(L.t("zoom.loupe.in"));
+        lin.addActionListener(e -> changeLoupeFactor(+0.25));
+
+        updateLoupeLabel();
+
+        bar.add(new JLabel(L.t("zoom.title")));
+        bar.add(zoomLabel);
+        bar.add(fit);
+        bar.add(sep);
+        bar.add(new JLabel(L.t("zoom.loupe")));
+        bar.add(lout);
+        bar.add(loupeLabel);
+        bar.add(lin);
+        return bar;
+    }
+
+    /** 焦点在输入框里时不要吃掉按键（属性栏的 X/Y/W/H 要能正常输数字和 q） */
+    private static boolean textFocused() {
+        java.awt.Component c = java.awt.KeyboardFocusManager
+                .getCurrentKeyboardFocusManager().getFocusOwner();
+        return c instanceof javax.swing.text.JTextComponent
+                || c instanceof javax.swing.JSpinner;
     }
 
     private String hintText() {
@@ -302,6 +534,150 @@ public final class Editor extends JFrame {
                 new File(dir, "ui_layout_pages.json").getAbsolutePath());
     }
 
+    // ------------------------------------------------------------------ 颜色
+
+    /** 颜色预览块：点一下打开调色盘 */
+    private final class ColorChip extends JComponent {
+        private java.awt.Color color;
+
+        ColorChip() {
+            setPreferredSize(new Dimension(26, 18));
+            setMinimumSize(new Dimension(26, 18));
+            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        }
+
+        void set(java.awt.Color c) {
+            color = c;
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g0) {
+            Graphics2D g = (Graphics2D) g0.create();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            if (color == null) {
+                g.setColor(new Color(0x33, 0x38, 0x42));
+                g.fillRect(0, 0, getWidth(), getHeight());
+                g.setColor(new Color(0x8A, 0x92, 0xA0));
+                g.drawLine(1, getHeight() - 2, getWidth() - 2, 1);   // 斜线 = 未设置
+            } else {
+                g.setColor(color);
+                g.fillRect(0, 0, getWidth(), getHeight());
+            }
+            g.setColor(new Color(0x6E, 0x76, 0x86));
+            g.drawRect(0, 0, getWidth() - 1, getHeight() - 1);
+            g.dispose();
+        }
+    }
+
+    /** "×"：清除该路颜色（回到默认） */
+    private JButton colorClear(boolean isBg) {
+        JButton b = new JButton("×");
+        b.setMargin(new Insets(0, 4, 0, 4));
+        b.setFocusable(false);
+        b.setToolTipText(L.t("color.clear"));
+        b.addActionListener(e -> {
+            applyColor(isBg, "");
+        });
+        return b;
+    }
+
+    /** 打开系统调色盘（自带 RGB/HSV 滑条与色板） */
+    private void pickColor(boolean isBg) {
+        if (selected == null) {
+            return;
+        }
+        String cur = isBg ? selected.bg : selected.fg;
+        java.awt.Color init = parseColor(cur);
+        java.awt.Color c = javax.swing.JColorChooser.showDialog(this,
+                L.t(isBg ? "color.pickBg" : "color.pickFg"),
+                init != null ? init : new java.awt.Color(0x40, 0x46, 0x52));
+        if (c != null) {
+            applyColor(isBg, toHex(c));
+        }
+    }
+
+    /** 输入框/调色盘 → 节点颜色（空串 = 清除；非法值恢复原文本） */
+    private void applyColor(boolean isBg, String text) {
+        Manifest.Node n = selected;
+        if (n == null) {
+            return;
+        }
+        String raw = text == null ? "" : text.trim();
+        String hex = null;
+        if (!raw.isEmpty()) {
+            java.awt.Color c = parseColor(raw);
+            if (c == null) {
+                syncColorFields(n);          // 输到一半的非法值：恢复显示
+                return;
+            }
+            hex = toHex(c);
+        }
+        if (isBg) {
+            n.bg = hex;
+        } else {
+            n.fg = hex;
+        }
+        n.colorDirty = n.colorChanged();
+        syncColorFields(n);
+        canvas.repaint();
+        updateStatus();
+        pathLabel.setText(String.format("%s    %s%s", n.display(),
+                n.path.isEmpty() ? (L.t("path.block") + n.blockId)
+                        : (L.t("path.block") + n.blockId + " / " + n.path),
+                n.dirty || n.colorDirty ? L.t("path.dirty2") : ""));
+    }
+
+    /** 把节点当前颜色刷到预览块与输入框 */
+    private void syncColorFields(Manifest.Node n) {
+        if (n == null) {
+            swBg.set(null);
+            swFg.set(null);
+            txBg.setText("");
+            txFg.setText("");
+            txBg.setEnabled(false);
+            txFg.setEnabled(false);
+            return;
+        }
+        txBg.setEnabled(true);
+        txFg.setEnabled(true);
+        swBg.set(parseColor(n.bg));
+        swFg.set(parseColor(n.fg));
+        txBg.setText(n.bg == null ? "" : n.bg);
+        txFg.setText(n.fg == null ? "" : n.fg);
+    }
+
+    /** "#RRGGBB" / "RRGGBB" / "0xRRGGBB" → Color */
+    private static java.awt.Color parseColor(String text) {
+        if (text == null) {
+            return null;
+        }
+        String t = text.trim().replace("0x", "").replace("#", "");
+        try {
+            if (t.length() == 6) {
+                return new java.awt.Color(Integer.parseInt(t, 16));
+            }
+            if (t.length() == 8) {
+                long v = Long.parseLong(t, 16);
+                return new java.awt.Color((int) ((v >> 16) & 0xFF), (int) ((v >> 8) & 0xFF),
+                        (int) (v & 0xFF), (int) ((v >> 24) & 0xFF));
+            }
+        } catch (RuntimeException ignored) {
+            // 非法输入
+        }
+        return null;
+    }
+
+    private static String toHex(java.awt.Color c) {
+        if (c == null) {
+            return null;
+        }
+        if (c.getAlpha() < 255) {
+            return String.format("#%02X%02X%02X%02X", c.getAlpha(), c.getRed(), c.getGreen(), c.getBlue());
+        }
+        return String.format("#%02X%02X%02X", c.getRed(), c.getGreen(), c.getBlue());
+    }
+
     private JPanel buildPropBar() {
         JPanel bar = new JPanel(new GridBagLayout());
         bar.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
@@ -329,7 +705,66 @@ public final class Editor extends JFrame {
         spH.addChangeListener(e -> applySpinners());
         cbVisible.addActionListener(e -> applySpinners());
 
+        /* ---- 第二行：颜色 ----
+         * 整行用一个 FlowLayout 子面板（跨满所有列）：直接塞进 GridBag 的话，
+         * 列宽受上面那排 spinner 约束，输入框会被压成十几像素宽（实测）。 */
+        JPanel colorRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        colorRow.setOpaque(false);
+        colorRow.add(new JLabel(L.t("color.bg")));
+        colorRow.add(swBg);
+        txBg.setColumns(9);
+        txBg.setPreferredSize(new Dimension(88, 22));
+        colorRow.add(txBg);
+        colorRow.add(colorClear(true));
+        colorRow.add(Box.createHorizontalStrut(10));
+        colorRow.add(new JLabel(L.t("color.fg")));
+        colorRow.add(swFg);
+        txFg.setColumns(9);
+        txFg.setPreferredSize(new Dimension(88, 22));
+        colorRow.add(txFg);
+        colorRow.add(colorClear(false));
+
+        gc.gridy = 2;
+        gc.gridx = 0;
+        gc.gridwidth = 14;
+        gc.fill = GridBagConstraints.HORIZONTAL;
+        bar.add(colorRow, gc);
+        gc.gridwidth = 1;
+        gc.fill = GridBagConstraints.NONE;
+
+        swBg.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                pickColor(true);
+            }
+        });
+        swFg.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                pickColor(false);
+            }
+        });
+        txBg.addActionListener(e -> applyColor(true, txBg.getText()));
+        txFg.addActionListener(e -> applyColor(false, txFg.getText()));
+        txBg.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                applyColor(true, txBg.getText());
+            }
+        });
+        txFg.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                applyColor(false, txFg.getText());
+            }
+        });
+        txBg.setToolTipText(L.t("color.hint"));
+        txFg.setToolTipText(L.t("color.hint"));
+        swBg.setToolTipText(L.t("color.pick"));
+        swFg.setToolTipText(L.t("color.pick"));
+
         gc.gridx = 9;
+        gc.gridy = 1;
         bar.add(Box.createHorizontalStrut(12), gc);
         gc.gridx = 10;
         JButton save = new JButton(L.t("btn.save"));
@@ -397,6 +832,12 @@ public final class Editor extends JFrame {
             return;
         }
         page = p;
+        /* 把已保存的布局叠到清单坐标上（2026-11-03）：清单是模拟器启动时的快照，
+         * 只读清单会让编辑器显示旧位置，保存时又把旧坐标写回去 —— 之前调好的位置被弹回。 */
+        if (!layoutApplied.contains(p.id)) {
+            Manifest.applyExistingLayout(p, dir);
+            layoutApplied.add(p.id);
+        }
         selected = null;
         DefaultMutableTreeNode root = new DefaultMutableTreeNode("root");
         treeNodes.clear();
@@ -546,8 +987,10 @@ public final class Editor extends JFrame {
             cbVisible.setEnabled(on);
             if (n == null) {
                 pathLabel.setText(L.t("not.selected"));
+                syncColorFields(null);
                 return;
             }
+            syncColorFields(n);
             spX.setValue(n.x);
             spY.setValue(n.y);
             spW.setValue(n.w);
@@ -672,8 +1115,23 @@ public final class Editor extends JFrame {
         private List<Manifest.Node> siblings = java.util.Collections.emptyList();
         private Manifest.Node sel;
 
+        /** 画布四周留白（模型坐标外扩） */
+        static final int PAD = 14;
+        /** 用户缩放倍率：1.0 = 适应窗口，>1 放大、<1 缩小 */
+        private double zoom = 1.0;
+        /** 适应窗口时算出的比例（缩放倍率的作用基准） */
+        private double fitScale = 1.0;
+        /** 实际比例 = fitScale * zoom */
         private double scale = 1;
-        private int ox, oy;
+        private int ox = PAD, oy = PAD;
+
+        /** 滚动容器（画布按缩放后的尺寸放进视口，超出部分用滚动条看） */
+        private JScrollPane scroll;
+        /** 上一次按哪个视口尺寸算的比例（视口没变就不重算，避免布局抖动） */
+        private int lastVpW = -1, lastVpH = -1;
+
+        /* 长按放大的状态（magnifying / magnifyFactor / zoomBeforeMagnify…）已经删掉：
+         * 现在是纯粹的放大镜——盖在窗口上放大一块画面，页面本身不缩放、不滚动。 */
 
         private boolean dragging, resizing;
         private int dragDX, dragDY;
@@ -691,6 +1149,23 @@ public final class Editor extends JFrame {
             };
             addMouseListener(h);
             addMouseMotionListener(h);
+
+            /* 滚轮（2026-11-03）：普通滚轮滚动画布；Ctrl+滚轮只能**缩小**（大面板一屏看全），
+             * 不会放大——画布永远不超过 1:1，放大交给长按热键的放大镜。 */
+            addMouseWheelListener(e -> {
+                if (e.isControlDown()) {
+                    double f = Math.pow(1.12, -e.getPreciseWheelRotation());
+                    if (f < 1.0) {
+                        zoomAt(zoom * f, e.getX(), e.getY());
+                    }
+                } else if (scroll != null) {
+                    JScrollBar bar = e.isShiftDown()
+                            ? scroll.getHorizontalScrollBar() : scroll.getVerticalScrollBar();
+                    bar.setValue(bar.getValue()
+                            + (int) Math.round(e.getPreciseWheelRotation() * bar.getUnitIncrement() * 3));
+                }
+                e.consume();
+            });
 
             // 方向键微调
             bind(KeyEvent.VK_LEFT, -1, 0);
@@ -728,7 +1203,142 @@ public final class Editor extends JFrame {
             this.parentH = Math.max(1, h);
             this.siblings = siblings == null ? java.util.Collections.emptyList() : siblings;
             this.sel = sel;
+            // 换页/钻取时回到"适应窗口"，否则上一页的缩放倍数会带过来
+            zoom = 1.0;
+            lastVpW = -1;              // 强制作一次重新计算
+            applyTransform();
+        }
+
+        void setScroll(JScrollPane sp) {
+            this.scroll = sp;
+            lastVpW = -1;
+            applyTransform();
+            if (sp != null) {
+                sp.getViewport().addComponentListener(new java.awt.event.ComponentAdapter() {
+                    @Override public void componentResized(java.awt.event.ComponentEvent e) {
+                        lastVpW = -1;          // 视口尺寸变了，重新算"适应窗口"比例
+                        applyTransform();
+                    }
+                });
+            }
+        }
+
+        /** 视口尺寸变化时才重算（paint 里调用，避免每帧重算引起抖动） */
+        private void ensureTransform() {
+            int vw = viewportWidth(), vh = viewportHeight();
+            if (vw != lastVpW || vh != lastVpH) {
+                applyTransform();
+            }
+        }
+
+        /**
+         * 用来算"适应窗口"的参考尺寸。
+         *
+         * <p>注意取的是**滚动面板自身**的尺寸，不是视口可见区域：视口在滚动条出现后会变窄，
+         * 若拿它当基准，放大→出滚动条→基准变小→画面变回原来的大小→滚动条消失，会来回抖。
+         * 滚动面板的尺寸只在窗口缩放时变化，所以基准是稳定的。</p>
+         */
+        private int viewportWidth() {
+            int w;
+            if (scroll != null) {
+                java.awt.Insets in = scroll.getInsets();
+                w = scroll.getWidth() - in.left - in.right;
+            } else {
+                w = getWidth();
+            }
+            return Math.max(60, w);
+        }
+
+        private int viewportHeight() {
+            int h;
+            if (scroll != null) {
+                java.awt.Insets in = scroll.getInsets();
+                h = scroll.getHeight() - in.top - in.bottom;
+            } else {
+                h = getHeight();
+            }
+            return Math.max(60, h);
+        }
+
+        /** 按当前 zoom 重算比例与画布首选尺寸（滚动条由 JScrollPane 自己管） */
+        void applyTransform() {
+            int vw = viewportWidth(), vh = viewportHeight();
+            lastVpW = vw;
+            lastVpH = vh;
+            double aw = Math.max(40, vw - PAD * 2.0);
+            double ah = Math.max(40, vh - PAD * 2.0);
+            /* 只缩不放（2026-11-03 晚）：原来这里直接取 min(aw/宽, ah/高)，
+             * 小面板会被"适应窗口"放大到 200%+ —— 打开就是放大的，看着像自己放大了。
+             * 现在封顶 1.0：画布最多 1:1，永不自动放大；要放大请按住热键用放大镜。 */
+            fitScale = Math.min(1.0, Math.min(aw / parentW, ah / parentH));
+            if (!(fitScale > 0)) {
+                fitScale = 1;
+            }
+            scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, fitScale * zoom));
+            ox = PAD;
+            oy = PAD;
+            int w = (int) Math.ceil(parentW * scale) + PAD * 2;
+            int h = (int) Math.ceil(parentH * scale) + PAD * 2;
+            Dimension d = new Dimension(w, h);
+            if (!d.equals(getPreferredSize())) {
+                setPreferredSize(d);
+                revalidate();
+            }
+            updateZoomLabel();
             repaint();
+        }
+
+        private void updateZoomLabel() {
+            if (zoomLabel != null) {
+                zoomLabel.setText(Math.round(scale * 100) + "%");
+            }
+        }
+
+        /** 以画布坐标 (mx,my) 为中心缩放到 targetZoom */
+        void zoomAt(double targetZoom, int mx, int my) {
+            Point model = toModel(mx, my);
+            double z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, targetZoom));
+            if (Math.abs(z - zoom) < 1e-6) {
+                return;
+            }
+            zoom = z;
+            applyTransform();
+            keepModelUnder(model, mx, my);
+        }
+
+        /** 按倍率缩放（工具栏 +/− 用，围绕视口中心） */
+        void zoomBy(double factor) {
+            int cx = scroll != null ? scroll.getViewport().getExtentSize().width / 2 : getWidth() / 2;
+            int cy = scroll != null ? scroll.getViewport().getExtentSize().height / 2 : getHeight() / 2;
+            Point vp = scroll != null ? scroll.getViewport().getViewPosition() : new Point(0, 0);
+            zoomAt(zoom * factor, cx + vp.x, cy + vp.y);
+        }
+
+        /** 适应窗口（zoom = 1） */
+        void fitView() {
+            zoom = 1.0;
+            applyTransform();
+            if (scroll != null) {
+                scroll.getViewport().setViewPosition(new Point(0, 0));
+            }
+        }
+
+        /** 让模型点 model 保持在画布坐标 (mx,my) 处（缩放后不跑偏） */
+        private void keepModelUnder(Point model, int mx, int my) {
+            if (scroll == null) {
+                return;
+            }
+            int nx = (int) Math.round(ox + model.x * scale);
+            int ny = (int) Math.round(oy + model.y * scale);
+            JViewport vp = scroll.getViewport();
+            Point pos = vp.getViewPosition();
+            Dimension view = getPreferredSize();
+            Dimension ext = vp.getExtentSize();
+            int px = nx - mx + pos.x;
+            int py = ny - my + pos.y;
+            px = Math.max(0, Math.min(Math.max(0, view.width - ext.width), px));
+            py = Math.max(0, Math.min(Math.max(0, view.height - ext.height), py));
+            vp.setViewPosition(new Point(px, py));
         }
 
         @Override
@@ -738,13 +1348,8 @@ public final class Editor extends JFrame {
             g.fillRect(0, 0, getWidth(), getHeight());
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-            int pad = 14;
-            scale = Math.min((getWidth() - pad * 2.0) / parentW, (getHeight() - pad * 2.0) / parentH);
-            if (!(scale > 0)) {
-                scale = 1;
-            }
-            ox = (int) Math.round((getWidth() - parentW * scale) / 2);
-            oy = (int) Math.round((getHeight() - parentH * scale) / 2);
+            ensureTransform();          // 比例/原点由 applyTransform 统一算（滚动 + 缩放）
+            updateZoomLabel();
 
             // 父容器底
             g.setColor(new Color(0x2C, 0x31, 0x3B));
@@ -752,35 +1357,49 @@ public final class Editor extends JFrame {
             g.setColor(new Color(0x55, 0x5C, 0x6A));
             g.drawRect(ox, oy, (int) Math.round(parentW * scale), (int) Math.round(parentH * scale));
 
-            g.setFont(new Font("Dialog", Font.PLAIN, 11));
+            /* 文字跟着缩放一起放大（2026-11-03）：只放几何不放字的话，放大后
+             * 方块变大了、字还是 11 px，反而更难看清（长按 Q 就看不出细节了）。 */
+            double zoomRatio = (fitScale > 0) ? (scale / fitScale) : 1.0;
+            int fontSize = (int) Math.round(Math.max(8, Math.min(28, 11 * zoomRatio)));
+            g.setFont(new Font("Dialog", Font.PLAIN, fontSize));
+            java.awt.FontMetrics fm = g.getFontMetrics();
             for (Manifest.Node n : siblings) {
                 Rectangle r = toScreen(n);
                 boolean isSel = n == sel;
-                g.setColor(n.visible
-                        ? (isSel ? new Color(0x3A, 0x5A, 0x8C) : new Color(0x39, 0x40, 0x4C))
-                        : new Color(0x4A, 0x2A, 0x2A));
+                java.awt.Color customBg = parseColor(n.bg);
+                g.setColor(customBg != null ? customBg
+                        : (n.visible
+                                ? (isSel ? new Color(0x3A, 0x5A, 0x8C) : new Color(0x39, 0x40, 0x4C))
+                                : new Color(0x4A, 0x2A, 0x2A)));
                 g.fillRect(r.x, r.y, r.width, r.height);
                 g.setColor(isSel ? new Color(0xFF, 0xD8, 0x4A) : new Color(0x6E, 0x76, 0x86));
                 g.setStroke(new BasicStroke(isSel ? 2f : 1f));
                 g.drawRect(r.x, r.y, r.width, r.height);
                 g.setStroke(new BasicStroke(1f));
 
+                // 按可用宽度裁字（按实际字宽算，不再写死 16 个字符）
                 String label = n.label.isEmpty() ? n.cls : n.label;
-                if (label.length() > 16) {
-                    label = label.substring(0, 16) + "…";
+                int avail = r.width - 8;
+                if (avail > 10) {
+                    while (label.length() > 1 && fm.stringWidth(label) > avail) {
+                        label = label.substring(0, label.length() - 1);
+                    }
                 }
-                g.setColor(isSel ? Color.WHITE : new Color(0xC8, 0xCE, 0xD8));
+                java.awt.Color customFg = parseColor(n.fg);
+                g.setColor(customFg != null ? customFg
+                        : (isSel ? Color.WHITE : new Color(0xC8, 0xCE, 0xD8)));
                 if (r.width > 30 && r.height > 12) {
-                    g.drawString(label, r.x + 4, r.y + Math.min(r.height - 3, 13));
+                    g.drawString(label, r.x + 4, r.y + Math.min(r.height - 3, fm.getAscent() + 2));
                 }
                 if (isSel) {
-                    // 右下角缩放把手
+                    // 右下角缩放把手（跟着缩放变大一点，方便抓）
+                    int hs = (int) Math.max(6, Math.min(14, Math.round(6 * zoomRatio)));
                     g.setColor(new Color(0xFF, 0xD8, 0x4A));
-                    g.fillRect(r.x + r.width - 6, r.y + r.height - 6, 6, 6);
+                    g.fillRect(r.x + r.width - hs, r.y + r.height - hs, hs, hs);
                     // 坐标提示
                     g.setColor(new Color(0xFF, 0xE9, 0x8A));
                     g.drawString(n.x + "," + n.y + "  " + n.w + "×" + n.h,
-                            r.x + 4, r.y + Math.min(r.height - 3, 26));
+                            r.x + 4, r.y + Math.min(r.height - 3, fm.getAscent() * 2 + 4));
                 }
             }
             if (siblings.isEmpty()) {

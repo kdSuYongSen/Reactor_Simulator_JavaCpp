@@ -28,9 +28,11 @@ final class WindowMenu {
 
     /** 页面清单：i18n key + 窗口类（顺序即菜单顺序） */
     private static final Object[][] ITEMS = {
+        {"Plant Overview", PlantOverviewUI.class},
         {"Core Map", CoreMap.class},
         {"Selsyn Panel", SelsynPanel.class},
         {"Turbine-Generators", TGUI.class},
+        {"Turbine Lube Oil", TurbineLubeUI.class},
         {"MCP", MCPUI.class},
         {"Condensate", CondensateUI.class},
         {"Dearator", DearatorUI.class},

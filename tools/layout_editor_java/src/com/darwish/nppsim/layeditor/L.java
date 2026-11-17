@@ -70,11 +70,20 @@ public final class L {
         put("btn.reload", "重新读取清单", "Reload manifest");
         put("btn.help", "提示", "Help");
         put("btn.help.tip", "详细设置与操作说明（F1）", "Full setup & operation guide (F1)");
+        put("color.bg", "背景", "Background");
+        put("color.fg", "文字", "Text");
+        put("color.pick", "点这里打开调色盘（含滑条与色板）", "Click to open the colour picker");
+        put("color.pickBg", "选择背景色", "Pick background colour");
+        put("color.pickFg", "选择文字颜色", "Pick text colour");
+        put("color.clear", "清除该颜色（回到默认）", "Clear this colour (back to default)");
+        put("color.hint", "输入 #RRGGBB 后回车；留空表示不设置", "Type #RRGGBB and press Enter; empty = unset");
         put("btn.save", "保存", "Save");
         put("btn.resetNode", "恢复此节点", "Reset node");
         put("btn.resetPage", "恢复整页", "Reset page");
         put("btn.delete", "删除文件", "Delete file");
         put("btn.ok", "知道了", "Got it");
+        put("btn.settings", "设置…", "Settings...");
+        put("btn.cancel", "取消", "Cancel");
         put("lbl.window", "窗口", "Window");
         put("lbl.language", "语言", "Language");
         put("lbl.x", "X", "X");
@@ -122,11 +131,45 @@ public final class L {
         put("hint.canvas",
                 "<html>拖动方块＝移动，拖右下角＝改尺寸；方向键 ±1（Shift ±10）。"
                         + "画布显示的是“选中节点的父容器”，兄弟不会跟着动。"
+                        + "<br>画布最多 1:1、<b>不会自己放大</b>；面板太大时用滚动条或 0＝适应窗口看全。"
+                        + "<b>长按 Q</b> 才放大：只把鼠标所指处放大，页面不动，倍率用工具条“放大镜 − +”调。"
                         + "　不清楚就点右上角“提示”（F1）。</html>",
                 "<html>Drag a box to move it, drag its bottom-right corner to resize; arrow keys nudge "
                         + "by 1 px (Shift = 10). The canvas shows the parent container of the selected "
-                        + "node, so siblings never move along. Stuck? Press the top-right Help button (F1)."
-                        + "</html>");
+                        + "node, so siblings never move along."
+                        + "<br>The canvas never auto-zooms above 1:1 - use the scrollbars or 0 = fit for "
+                        + "big pages. <b>Hold Q</b> for a loupe that magnifies at the cursor while the page "
+                        + "stays put; set its factor with the \"Loupe - +\" group on the toolbar."
+                        + " Stuck? Press the top-right Help button (F1).</html>");
+
+        // ---- 热键设置（2026-11-03）----
+        put("keys.title", "热键设置 —— 与模拟器共用", "Hotkeys - shared with the simulator");
+        put("keys.magnify", "长按放大", "Hold to magnify");
+        put("keys.zoomin", "放大", "Zoom in");
+        put("keys.zoomout", "缩小", "Zoom out");
+        put("keys.fit", "适应窗口", "Fit");
+        put("keys.loupe", "长按放大倍率", "Magnify factor");
+        put("keys.press", "按任意键…", "Press a key...");
+        put("keys.hint",
+                "<html>这里改的是 <b>%s</b>，模拟器和编辑器共用。<br>"
+                        + "点一下按钮，然后按想用的键即可。</html>",
+                "<html>These settings live in <b>%s</b> and are shared with the simulator.<br>"
+                        + "Click a button, then press the key you want.</html>");
+
+        // ---- 缩放（2026-11-03）----
+        put("zoom.title", "缩放", "Zoom");
+        put("zoom.in", "放大（快捷键 +）", "Zoom in (+)");
+        put("zoom.out", "缩小（快捷键 −）", "Zoom out (-)");
+        put("zoom.fit", "适应窗口", "Fit");
+        put("zoom.fit.tip", "缩放到刚好铺满画布（快捷键 0）", "Fit the whole page (press 0)");
+        put("zoom.label", "当前比例；100% = 模型像素 1:1", "Current zoom; 100% = model pixels 1:1");
+        put("zoom.loupe", "放大镜", "Loupe");
+        put("zoom.loupe.in", "放大镜倍率 +（点击调整）", "Loupe factor +");
+        put("zoom.loupe.out", "放大镜倍率 −（点击调整）", "Loupe factor -");
+        put("zoom.loupe.tip",
+                "放大镜倍率：按住热键时按这个倍率放大，跟页面缩放无关",
+                "Loupe factor - independent of the page zoom");
+        put("zoom.loupe.reset", "放大镜倍率复位到 2.5×", "Reset loupe factor");
 
         // ---- 说明对话框 ----
         put("help.title", "操作说明 —— RBMK-1500 布局编辑器", "Help - RBMK-1500 Layout Editor");

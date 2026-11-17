@@ -58,23 +58,34 @@ public class MCC extends Component {
     }
 
     protected class SeparatorDrum extends WaterSteamSubComponent implements Connectable, UIReadable, Serializable, SteamSupplyLimit {
-        private final double volume = 397.1;// drum + downcomers //682.35;
+        /**
+         * 汽包本体容积 m³（2026-11-05 按真实几何重算）。
+         *
+         * <p>RBMK-1500 的鼓式分离器是**两台**水平圆筒：内径 2.6 m、筒长 30.5 m，
+         * 单台 π·1.3²·30.5 ≈ 162 m³，两台 324 m³。</p>
+         */
+        static final double DRUM_BODY_M3 = 324.0;
+        /** 下降管 + 连接管容积 m³（始终满水，不参与汽空间） */
+        static final double DOWNCOMER_M3 = 73.0;
+        /** 汽包 + 下降管总容积 m³ */
+        static final double TOTAL_VOLUME_M3 = DRUM_BODY_M3 + DOWNCOMER_M3;
+
+        private final double volume = TOTAL_VOLUME_M3;
         private final double nominalWaterVolume;
         private double initialSteamMass; // this would be air in reality
         private double steamMass = 0.0; // kg
-        private double waterMass = 223089.51; //223,5 m3 (2 drums + downcomers) //305837.26; // 306.4 m3 at 20C
+        private double waterMass = NOMINAL_WATER_KG; // 水位 0 %（鼓中心线上 200 mm，200 t）
         private double steamProduction = 0.0; // kg/s
         private double thermalLoss = 0.0; // conductive energy loss Mwt
-        /**
-         * 堆芯送进本汽包的热功率 MW（由 NPPSim 主循环每 tick 写入，Core.thermalPower 两台均分）。
+        /* 汽包不再有外来热源（2026-11-01）。
          *
-         * <p>2026-10-27：此前堆芯功率只用于界面显示与动力学，
-         * {@code FuelChannel.update()} 是空实现、汽包也没有任何热源 ——
-         * 汽包只能靠"降压闪蒸"出汽，于是二回路产汽量与反应堆功率无关
-         * （功率拉高不会多产汽，降功率也不会少产汽，看起来就是"凭空产汽"）。
-         * 现在把堆芯热功率直接注入汽包水，产汽量由能量平衡决定。</p>
-         */
-        private double coreHeatMW = 0.0;
+         * 真实 RBMK 的鼓式分离器只做汽水分离：堆芯出来的汽水混合物进汽包，
+         * 蒸汽去汽轮机、饱和水经下降管回主循环泵。热量在燃料通道里就已经加进去了。
+         *
+         * 2026-10-27 曾把 Core.thermalPower 直接注入汽包水（当时 FuelChannel.update()
+         * 是空实现，一回路没有别的热源）；但后来通道侧补上了 thermalPower*50 kJ 的加热，
+         * 这个注入就变成了同一份功率计两次：产汽量翻倍、水位持续上涨、最后走泄压阀。
+         * 现在汽包的能量方程只保留"进汽冷凝 / 闪蒸"两项，堆芯功率全部走通道。 */
 
         // calculated results from the update thread stored here for use in other
         // functions:
@@ -92,12 +103,15 @@ public class MCC extends Component {
         public SeparatorDrum() {
             waterVolume = waterMass * specificDensityWater;
             steamVolume = volume - waterVolume;
-            nominalWaterVolume = waterVolume;
+            nominalWaterVolume = waterVolume;   // 仅存档兼容；水位已改按质量比
             initialSteamMass = steamVolume / 1.6718; // constant density for 20c
             steamDensity = steamVolume / (steamMass + initialSteamMass);
         }
 
         void update() {
+            /* 产汽计数按 tick 复位（2026-11-02 环路自检统一量纲），
+             * getter 再乘 20 → kg/s。原来靠 UI 的 resetFlowRates() 清零，与帧率耦合。 */
+            steamProduction = 0.0;
             double vacuumBreakerFlow = (pressure - 0.10142) * 20;
             waterMass -= waterOutflow;
             if (waterInflow < 0) {
@@ -133,9 +147,10 @@ public class MCC extends Component {
                 initialSteamMass -= vacuumBreakerFlow;
             }
             
-            /* 能量平衡（kJ/tick）：deltaEnergy 是蒸发/冷凝的潜热欠账，
-             * thermalLoss 是散热，coreHeatMW 是堆芯送进来的热量（MW × 0.05 s × 1000 = kJ）。 */
-            double energy = 0 - deltaEnergy / 3 - thermalLoss * 50 + coreHeatMW * 1000.0 * 0.05;
+            /* 能量平衡（kJ/tick）：deltaEnergy 是蒸发/冷凝的潜热欠账，thermalLoss 是散热。
+             * 汽包没有外来热源：进汽在下面的平衡里按"蒸汽空间存量 → 饱和平衡"折算，
+             * 温度只由进水混合与相变决定。 */
+            double energy = 0 - deltaEnergy / 3 - thermalLoss * 50;
             deltaEnergy -= deltaEnergy / 3;
 
             waterTemperature += (energy / (specificHeatWater * waterMass));
@@ -173,10 +188,40 @@ public class MCC extends Component {
 
             specificDensityWater = Loader.tables.getWaterDensityByTemp(waterTemperature);
             waterVolume = waterMass * specificDensityWater;
-            waterLevel = (waterVolume / nominalWaterVolume - 1) * 100;
-            steamVolume = volume - waterVolume;
-            steamDensity = steamVolume / (steamMass + initialSteamMass);
-            pressure = Loader.tables.getSteamPressureByDensity(steamDensity);
+            waterLevel = levelFromMass(waterMass);
+            steamVolume = Math.max(0.0, volume - waterVolume);
+            steamDensity = steamVolume / Math.max(1e-9, steamMass + initialSteamMass);
+
+            /* ---- 汽包压力（2026-11-05 重写）----
+             *
+             * <p>旧实现 {@code pressure = f(蒸汽比容)}：汽空间只有 96 m³ / 3.5 t 汽时，
+             * 主汽门抽走 280 kg 压力就掉 0.4 MPa，1 秒掉 1 MPa。于是单回路里
+             * "抽汽 → 压力塌 → 通道沸点降 → 空泡塌 → 正反应性 → 功率暴涨"
+             * 这个链条被瞬间点燃（实测 1.5 s 冲到 33 000 MW）。</p>
+             *
+             * <p>真实汽包的压力是**由 174 t 饱和水的温度决定**的（水和汽共存，
+             * 压力 = 该温度下的饱和压力），蒸汽空间只是缓冲，不可能让压力跟着
+             * 单 tick 的抽汽跳。这里就按这个物理来：</p>
+             * <ul>
+             *   <li>汽空间还有足够的汽（≥ 饱和量的 40 %）→ 压力 = 水温对应的饱和压力，
+             *       时间常数由 174 t 水的热容决定（几百秒级），抽汽引起的压力变化很缓；</li>
+             *   <li>汽被抽空（&lt; 40 %）→ 退回到"按剩余汽量算"，压力自然会塌，
+             *       避免出现"汽包空了却还有 6.9 MPa"的假象。</li>
+             * </ul>
+             */
+            double pSat = Loader.tables.getSteamPressureByTemp(waterTemperature);
+            if (!Double.isFinite(pSat) || pSat <= 0.0) {
+                pSat = pressure;
+            }
+            double svgSat = Loader.tables.getSteamDensityByPressure(pSat);   // 实为饱和汽比容 m³/kg
+            double satSteamMass = (!Double.isFinite(svgSat) || svgSat <= 0.0)
+                    ? steamMass : steamVolume / svgSat;
+            if (steamMass >= satSteamMass * 0.4) {
+                pressure = pSat;
+            } else {
+                double pByDensity = Loader.tables.getSteamPressureByDensity(steamDensity);
+                pressure = Math.min(pSat, pByDensity);
+            }
             boilingPoint = Loader.tables.getSteamTemperatureByPressure(pressure);
             sanitize();                       // 数值卫生：溢出/NaN 时把蒸汽转回水（质量守恒）
             resetFlows();
@@ -193,6 +238,25 @@ public class MCC extends Component {
          *   <li>水量低于 {@link #MIN_WATER_KG} → 补到最小值（日志里有记录，避免干锅）。</li>
          * </ul>
          */
+        /**
+         * 水位表读数（%）：0 % = 额定 174 t（鼓中心线），+100 % = 表盘满量程 440 t。
+         *
+         * <p>用**质量**而不是体积：体积口径依赖比容，冷态（20 °C，1.0e-3）和热态
+         * （284 °C，1.35e-3）会差 35 %，同一包水一升温水位就凭空低 26 %，
+         * 冷热态读数对不上。质量口径在任何温度下都是同一把尺。</p>
+         */
+        double levelFromMass(double massKg) {
+            return (massKg - NOMINAL_WATER_KG) / (LEVEL_TABLE_MAX_KG - NOMINAL_WATER_KG) * 100.0;
+        }
+
+        /**
+         * 物理最大水装 kg：汽包容积的 97 %（留 3 % 给汽空间，否则
+         * {@code steamVolume} 会变成负数 → 蒸汽密度为负 → 压力 NaN → 仿真发散）。
+         */
+        double maxWaterMass() {
+            return volume * 0.97 / Math.max(1e-6, specificDensityWater);
+        }
+
         void sanitize() {
             if (!Double.isFinite(waterMass)) {
                 waterMass = NOMINAL_WATER_KG;
@@ -209,9 +273,10 @@ public class MCC extends Component {
             if (!Double.isFinite(waterMass) || waterMass < MIN_WATER_KG) {
                 waterMass = MIN_WATER_KG;
             }
-            if (waterMass > NOMINAL_WATER_KG * 1.6) {
+            double maxWater = maxWaterMass();
+            if (waterMass > maxWater) {
                 // 水量过多：超出部分转到除盐水箱（不凭空消失）
-                double excess = waterMass - NOMINAL_WATER_KG * 1.6;
+                double excess = waterMass - maxWater;
                 waterMass -= excess;
                 if (NPPSim.pcs != null && NPPSim.pcs.demineralizedWaterTank != null) {
                     NPPSim.pcs.demineralizedWaterTank.updateWaterInflow(excess, waterTemperature);
@@ -230,20 +295,34 @@ public class MCC extends Component {
         }
 
         /** 汽空间存量上限（超过就冷凝成水） */
-        static final double MAX_STEAM_KG = 6000.0;
+        static final double MAX_STEAM_KG = 12000.0;
         /** 水容积下限（防止干锅/负质量） */
         static final double MIN_WATER_KG = 20000.0;
-        /** 额定水量（223 t） */
-        static final double NOMINAL_WATER_KG = 223089.51;
 
-        /** 堆芯热功率注入（MW）。每 tick 由 NPPSim 调用；0 表示停堆/无热源。 */
-        void addCoreHeatMW(double mw) {
-            coreHeatMW = Double.isFinite(mw) ? Math.max(0.0, Math.min(20000.0, mw)) : 0.0;
-        }
+        /**
+         * 额定水装 kg（水位 0 %，2026-11-05 重算）。
+         *
+         * <p>真实 RBMK 的正常水位在鼓中心线**上方约 200 mm**（鼓内径 2.6 m）。按弓形面积算，
+         * 单台水位截面积 3.17 m² × 长 30.5 m = 97 m³，两台 193 m³，加下降管 73 m³
+         * 共 266 m³；284 °C 饱和水密度 741 kg/m³ → <b>197 t</b>，取 200 t。</p>
+         *
+         * <p>这样汽空间是 397 − 270 = 127 m³（约 4.6 t 蒸汽），旧实现是
+         * 223 t 水 / 96 m³ 汽空间 / 3.5 t 汽 —— 汽空间大了 32 %，
+         * 主汽门抽汽时能多缓冲三分之一的时间。</p>
+         *
+         * <p>旧值 223 t 把汽包灌到 76 % 满，汽空间只剩 24 %，不像真实汽包。</p>
+         */
+        static final double NOMINAL_WATER_KG = 200000.0;
 
-        double getCoreHeatMW() {
-            return coreHeatMW;
-        }
+        /**
+         * 水位表满量程对应的水量 kg（用户指定 Max 440 t）。
+         *
+         * <p>物理上 397 m³ 的汽包最多装约 285 t 水（水位约 +35 %，见 {@link #maxWaterMass()}），
+         * 440 t 装不进去 —— 所以 440 t 是**表盘满量程**（满水事故线），
+         * 与真实机组的做法一致：表盘 0 % = 正常水位，+100 % = 满水事故线，
+         * 正常运行只在 0 % 上下几个百分点。界面按这个口径标刻度。</p>
+         */
+        static final double LEVEL_TABLE_MAX_KG = 440000.0;
 
         /** 汽空间真实存量：抽汽不能超过这里（原先没有限制，靠闪蒸凭空补） */
         @Override public double availableSteamKg() {
@@ -301,8 +380,15 @@ public class MCC extends Component {
             return boilingPoint;
         }
 
+        /**
+         * 汽包产汽速率 kg/s（2026-11-02 环路自检统一量纲）。
+         *
+         * <p>原来返回的是"自上次 resetFlowRates()（UI 每帧调一次）以来累计的 kg/tick"，
+         * 既不是速率也与 tick 频率耦合；现在计数器在 update() 里按 tick 复位，
+         * getter 再乘 20（tick = 50 ms）得到 kg/s，与通道侧口径一致。</p>
+         */
         public double getSteamProduction() {
-            return steamProduction;
+            return steamProduction * 20.0;
         }
 
         @Override
@@ -336,6 +422,38 @@ public class MCC extends Component {
         public void setSteamPressure(double press) {
             pressure = press;
         }
+
+        /**
+         * 把汽包整体重置到某个温度的饱和状态：水装量、汽空间质量、压力三者自洽。
+         *
+         * <p>原来的 {@code setWaterTemp} 只改水温 + 压力，不动汽空间质量：
+         * 下一帧 update() 会按"汽空间质量 = 初始空气 104 kg"反算出 ~0.1 MPa，
+         * 而水还停在 270 °C —— 170 K 过热度，一帧内闪蒸掉半包水，
+         * 通道被瞬间抽干并误判干涸。自检（DryoutCheck / CoreHeatCouplingCheck）
+         * 热态起步就踩在这个坑上。</p>
+         */
+        void resetToTemperature(double tempC) {
+            waterTemperature = tempC;
+            steamTemperature = tempC;
+            specificDensityWater = Loader.tables.getWaterDensityByTemp(tempC);
+            /* 按**额定质量**装水（2026-11-05）：旧写法 volume/比容 在热态下只有 163 t，
+             * 一升温水位就凭空变成 −26 %，整定还没开始就少了一大截水。 */
+            waterMass = NOMINAL_WATER_KG;
+            waterVolume = waterMass * specificDensityWater;
+            steamVolume = Math.max(0.0, volume - waterVolume);
+            double p = Loader.tables.getSteamPressureByTemp(tempC);
+            double svg = Loader.tables.getSteamDensityByPressure(p);   // 实为饱和汽比容 m³/kg
+            if (!Double.isFinite(svg) || svg <= 0.0) {
+                svg = 0.0274;
+            }
+            steamMass = steamVolume / svg;
+            initialSteamMass = 0.0;
+            pressure = p;
+            boilingPoint = tempC;
+            deltaEnergy = 0.0;
+            steamProduction = 0.0;
+            waterLevel = levelFromMass(waterMass);
+        }
     }
     
     protected class SteamWaterPipe implements Serializable {
@@ -351,13 +469,15 @@ public class MCC extends Component {
     }
 
     public void update() {
-        if (source.getSteamVolume() == 0) {
-            steamFlow = source.getSteamMass();
-        } else {
-            double ratio = source.getSteamVolume() / (source.getSteamVolume() + drain.getSteamVolume());
-            double totalMass = source.getSteamMass() + drain.getSteamMass();
-            steamFlow = source.getSteamMass() - (ratio * totalMass);
-        }
+        /* 通道 → 汽包是**单向**的（2026-11-07 单回路修正）。
+         *
+         * <p>旧实现按"汽空间体积比分配总蒸汽质量"：
+         * {@code steamFlow = 通道汽 − 通道汽空间/(通道+汽包汽空间) × (通道汽+汽包汽)}。
+         * 汽包汽空间 127 m³、单根通道不到 0.001 m³，比值约 4e-6，但汽包蒸汽有 4.6 t，
+         * 于是**每根通道每 tick 从汽包倒扣 0.018 kg** —— 1661 根合计 600 kg/s，
+         * 等于汽包在被自己的通道反向抽汽。单回路里没有任何中间环节补这一块，
+         * 汽包 30 s 就掉 60 t 水、压力从 6.9 塌到 2.4 MPa。 */
+        steamFlow = source.getSteamMass();
         if (steamFlow >= 0) {
             steamTemp = source.getSteamTemperature();
         } else {
@@ -495,7 +615,9 @@ public class MCC extends Component {
 
         @Override
         public double getWaterMass() {
-            throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
+            // 2026-11-01：原先这里直接抛 UnsupportedOperationException，
+            // 任何诊断/自检读母管装量都会把调用线程打死。母管本来就有 waterMass 字段，直接返回。
+            return waterMass;
         }
     }
 
@@ -543,16 +665,12 @@ public class MCC extends Component {
             i.setWaterTemp(tempC);
             i.setSteamPressure(saturatedPress);
         }
-        drum1.waterTemperature = tempC;
-        drum1.setSteamPressure(saturatedPress);
-        drum2.waterTemperature = tempC;
-        drum2.setSteamPressure(saturatedPress);
+        drum1.resetToTemperature(tempC);
+        drum2.resetToTemperature(tempC);
         pHeader1.waterTemperature = tempC;
         pHeader2.waterTemperature = tempC;
         pHeader1.waterMass = pHeader1.volume / NPPSim.tables.getWaterDensityByTemp(tempC);
         pHeader2.waterMass = pHeader2.volume / NPPSim.tables.getWaterDensityByTemp(tempC);
-        drum1.waterMass = drum1.nominalWaterVolume / NPPSim.tables.getWaterDensityByTemp(tempC);
-        drum2.waterMass = drum2.nominalWaterVolume / NPPSim.tables.getWaterDensityByTemp(tempC);
     }
 
 }

@@ -88,6 +88,7 @@ public final class RbmkCore implements AutoCloseable {
     private static native void   nativeResetScram(long h);
     private static native void   nativeSetFlowFraction(long h, double f);
     private static native void   nativeSetOfflineFlow(long h, double kgs);
+    private static native void   nativeSetDryoutFraction(long h, double f);
     private static native void   nativeSetSaturationTemp(long h, double c);
     private static native void   nativeSetInletEnthalpy(long h, double jPerKg);
     private static native void   nativeSetPowerSetpoint(long h, double w);
@@ -132,6 +133,23 @@ public final class RbmkCore implements AutoCloseable {
     public void setFlowFraction(double f){ nativeSetFlowFraction(handle, f); }
     /** 离线冷却河水流量 kg/s（20°C 冷源置换热沉，经换热器冷却一回路） */
     public void setOfflineFlow(double kgs){ nativeSetOfflineFlow(handle, kgs); }
+    /**
+     * 干涸通道占比 0..1。内核按 H_CM×(1−0.95f) 降低堆芯平均换热能力 ——
+     * 干涸的通道几乎不把热量交给冷却剂，燃料/包壳温度随之抬升（Doppler 负反馈由此进入）。
+     * 旧版 DLL（2026-11-01 之前构建）没有这个符号：捕获 UnsatisfiedLinkError 后禁用该功能，
+     * 不影响其它物理。
+     */
+    public void setDryoutFraction(double f){
+        if (handle == 0L || dryoutUnsupported) return;
+        try {
+            nativeSetDryoutFraction(handle, f);
+        } catch (UnsatisfiedLinkError e) {
+            dryoutUnsupported = true;
+        }
+    }
+    /** 当前内核是否支持干涸反馈（旧 DLL 为 false） */
+    public boolean supportsDryout() { return !dryoutUnsupported; }
+    private static volatile boolean dryoutUnsupported = false;
     /** 当前压力对应的饱和温度 °C（由 Java 蒸汽表给出，替代固定 284°C） */
     public void setSaturationTemp(double c){ nativeSetSaturationTemp(handle, c); }
     /** 入口焓 J/kg（相对 h(270°C)=0；由 Java 蒸汽表按入口温度差算出） */

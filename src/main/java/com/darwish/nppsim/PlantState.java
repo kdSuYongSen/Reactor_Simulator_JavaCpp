@@ -66,6 +66,8 @@ final class PlantState implements Serializable {
 
     AutoControl autoControl;
     PCS pcs;
+    /** 全厂电气系统（2026-11-12 新增；旧档读出为 null，由 NPPSim 补建） */
+    ElectricalGrid grid;
 
     ArrayList<HeatExchanger> heatExchangers;
     ArrayList<Separator> separators;
@@ -119,6 +121,7 @@ final class PlantState implements Serializable {
 
         s.autoControl = NPPSim.autoControl;
         s.pcs = NPPSim.pcs;
+        s.grid = NPPSim.grid;
 
         s.heatExchangers = copy(NPPSim.heatExchangers);
         s.separators = copy(NPPSim.separators);

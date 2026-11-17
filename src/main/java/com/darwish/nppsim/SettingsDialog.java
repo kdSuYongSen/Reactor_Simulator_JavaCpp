@@ -75,6 +75,14 @@ public class SettingsDialog extends JDialog {
     // 语言分页控件
     private JPanel languagePanel;
     private JLabel languageHint;
+    // 语言分页 · 字体文件（2026-11-12：放字体文件即可显示目标文字）
+    private JPanel fontPanel;
+    private JLabel fontDirLabel;
+    private JLabel fontStatusLabel;
+    private JButton fontOpenButton;
+    private JButton fontRescanButton;
+    private JCheckBox fontPreferBox;
+    private JLabel fontHint;
 
     // 游戏分页控件
     private JPanel gamePanel;
@@ -108,6 +116,12 @@ public class SettingsDialog extends JDialog {
     private JLabel unitsHint;
     private JLabel classicHint;
 
+    /* 界面缩放热键（与布局编辑器共用 ui_zoom_keys.json） */
+    private JPanel hotkeyPanel;
+    private JLabel hotkeyHint;
+    private KeyCaptureButton keyMagnify, keyZoomIn, keyZoomOut, keyFit;
+    private javax.swing.JSpinner loupeSpinner;
+
     private final JButton applyButton = new JButton();
     private final JButton okButton = new JButton();
 
@@ -119,9 +133,10 @@ public class SettingsDialog extends JDialog {
     private static final int TAB_AUDIO = 1;
     private static final int TAB_VIDEO = 2;
     private static final int TAB_UNITS = 3;
-    private static final int TAB_LANGUAGE = 4;
-    private static final int TAB_MODS = 5;
-    private static final int TAB_CLASSIC = 6;
+    private static final int TAB_HOTKEY = 4;
+    private static final int TAB_LANGUAGE = 5;
+    private static final int TAB_MODS = 6;
+    private static final int TAB_CLASSIC = 7;
 
     /** 页面刷新率可选项（毫秒） */
     private static final long[] REFRESH_VALUES = {50, 100, 150, 200, 500, 1000};
@@ -137,6 +152,7 @@ public class SettingsDialog extends JDialog {
         tabs.addTab("", buildAudioTab());
         tabs.addTab("", buildVideoTab());
         tabs.addTab("", buildUnitsTab());
+        tabs.addTab("", buildHotkeyTab());
         tabs.addTab("", buildLanguageTab());
         tabs.addTab("", buildModsTab());
         tabs.addTab("", buildClassicTab());
@@ -170,6 +186,7 @@ public class SettingsDialog extends JDialog {
 
     /** 应用全部设置：持久化 + 立即刷新（音量/风格等控件本身即改即生效，这里兜底保存） */
     private void applyAll() {
+        saveZoomSettings();
         SoundProvider.saveVolumes();
         try {
             PREFS.flush();
@@ -189,6 +206,7 @@ public class SettingsDialog extends JDialog {
         tabs.setTitleAt(TAB_AUDIO, Localization.t("settings.tab.audio"));
         tabs.setTitleAt(TAB_VIDEO, Localization.t("settings.tab.video"));
         tabs.setTitleAt(TAB_UNITS, Localization.t("settings.units.tab"));
+        tabs.setTitleAt(TAB_HOTKEY, Localization.t("settings.hotkey.tab"));
         tabs.setTitleAt(TAB_LANGUAGE, Localization.t("settings.tab.language"));
         tabs.setTitleAt(TAB_MODS, Localization.t("settings.tab.mods"));
         tabs.setTitleAt(TAB_CLASSIC, Localization.t("settings.tab.classic"));
@@ -203,6 +221,16 @@ public class SettingsDialog extends JDialog {
         if (languagePanel != null) {
             languagePanel.setBorder(BorderFactory.createTitledBorder(Localization.t("settings.language.group")));
             languageHint.setText(Localization.t("settings.language.hint"));
+        }
+        if (fontPanel != null) {
+            fontPanel.setBorder(BorderFactory.createTitledBorder(Localization.t("settings.fonts.group")));
+            fontDirLabel.setText(Localization.t("settings.fonts.dir") + " "
+                    + FontFiles.primaryDir().getAbsolutePath());
+            fontOpenButton.setText(Localization.t("settings.fonts.open"));
+            fontRescanButton.setText(Localization.t("settings.fonts.rescan"));
+            fontPreferBox.setText(Localization.t("settings.fonts.prefer"));
+            fontHint.setText(Localization.t("settings.fonts.hint"));
+            updateFontStatus();
         }
         if (gamePanel != null) {
             gamePanel.setBorder(BorderFactory.createTitledBorder(Localization.t("settings.game.group")));
@@ -573,6 +601,124 @@ public class SettingsDialog extends JDialog {
     }
 
     // ---------------- 语言 ----------------
+    /** 界面缩放/热键页（2026-11-03）：改完与布局编辑器共用同一份配置 */
+    private JPanel buildHotkeyTab() {
+        hotkeyPanel = new JPanel();
+        hotkeyPanel.setBorder(BorderFactory.createTitledBorder(Localization.t("settings.hotkey.group")));
+        hotkeyPanel.setBackground(UI.BACKGROUND);
+        hotkeyPanel.setLayout(new java.awt.GridBagLayout());
+        java.awt.GridBagConstraints gc = new java.awt.GridBagConstraints();
+        gc.insets = new java.awt.Insets(6, 8, 6, 8);
+        gc.anchor = java.awt.GridBagConstraints.WEST;
+
+        ZoomSettings zs = ZoomSettings.load();
+        keyMagnify = new KeyCaptureButton(zs.magnify);
+        keyZoomIn = new KeyCaptureButton(zs.zoomIn);
+        keyZoomOut = new KeyCaptureButton(zs.zoomOut);
+        keyFit = new KeyCaptureButton(zs.fit);
+
+        int row = 0;
+        row = addHotkeyRow(gc, row, "settings.hotkey.magnify", keyMagnify);
+        row = addHotkeyRow(gc, row, "settings.hotkey.zoomin", keyZoomIn);
+        row = addHotkeyRow(gc, row, "settings.hotkey.zoomout", keyZoomOut);
+        row = addHotkeyRow(gc, row, "settings.hotkey.fit", keyFit);
+
+        JLabel loupeLabel = new JLabel(Localization.t("settings.hotkey.loupe"));
+        gc.gridx = 0; gc.gridy = row; gc.gridwidth = 1; gc.weightx = 0;
+        hotkeyPanel.add(loupeLabel, gc);
+        loupeSpinner = new javax.swing.JSpinner(
+                new javax.swing.SpinnerNumberModel(zs.loupe, 1.2, 6.0, 0.1));
+        gc.gridx = 1; gc.gridy = row; gc.weightx = 1;
+        hotkeyPanel.add(loupeSpinner, gc);
+        row++;
+
+        hotkeyHint = new JLabel(Localization.t("settings.hotkey.hint"));
+        gc.gridx = 0; gc.gridy = row; gc.gridwidth = 2; gc.weightx = 1;
+        gc.insets = new java.awt.Insets(14, 8, 6, 8);
+        hotkeyPanel.add(hotkeyHint, gc);
+
+        return hotkeyPanel;
+    }
+
+    private int addHotkeyRow(java.awt.GridBagConstraints gc, int row, String labelKey,
+                             KeyCaptureButton btn) {
+        JLabel l = new JLabel(Localization.t(labelKey));
+        gc.gridx = 0; gc.gridy = row; gc.gridwidth = 1; gc.weightx = 0;
+        hotkeyPanel.add(l, gc);
+        gc.gridx = 1; gc.gridy = row; gc.weightx = 1;
+        hotkeyPanel.add(btn, gc);
+        return row + 1;
+    }
+
+    /** 把热键页的取值写进 ui_zoom_keys.json，并让主窗口立刻重新绑定 */
+    private void saveZoomSettings() {
+        if (keyMagnify == null) {
+            return;
+        }
+        ZoomSettings zs = new ZoomSettings();
+        zs.magnify = keyMagnify.getKeyCode();
+        zs.zoomIn = keyZoomIn.getKeyCode();
+        zs.zoomOut = keyZoomOut.getKeyCode();
+        zs.fit = keyFit.getKeyCode();
+        zs.loupe = ((Number) loupeSpinner.getValue()).doubleValue();
+        zs.save();
+        if (getOwner() instanceof UI) {
+            ((UI) getOwner()).bindZoomKeys();
+        }
+    }
+
+    /**
+     * 按键捕获按钮：点一下进入"请按键"状态，按任意键即取该键。
+     *
+     * <p>用按钮自己接 KeyListener（要请求焦点），不再额外弹对话框 ——
+     * 少一层窗口，也不容易抢错焦点。</p>
+     */
+    static final class KeyCaptureButton extends JButton {
+        private int keyCode;
+        private boolean capturing;
+
+        KeyCaptureButton(int code) {
+            keyCode = code;
+            setPreferredSize(new Dimension(120, 26));
+            setFocusable(true);
+            addActionListener(e -> startCapture());
+            addKeyListener(new java.awt.event.KeyAdapter() {
+                @Override public void keyPressed(java.awt.event.KeyEvent e) {
+                    if (!capturing) {
+                        return;
+                    }
+                    keyCode = e.getKeyCode();
+                    capturing = false;
+                    refresh();
+                    e.consume();
+                }
+            });
+            addFocusListener(new java.awt.event.FocusAdapter() {
+                @Override public void focusLost(java.awt.event.FocusEvent e) {
+                    if (capturing) {
+                        capturing = false;
+                        refresh();
+                    }
+                }
+            });
+            refresh();
+        }
+
+        private void startCapture() {
+            capturing = true;
+            setText(Localization.t("settings.hotkey.press"));
+            requestFocusInWindow();
+        }
+
+        private void refresh() {
+            setText(ZoomSettings.text(keyCode));
+        }
+
+        int getKeyCode() {
+            return keyCode;
+        }
+    }
+
     private JPanel buildLanguageTab() {
         languagePanel = new JPanel();
         languagePanel.setBorder(BorderFactory.createTitledBorder(Localization.t("settings.language.group")));
@@ -594,8 +740,118 @@ public class SettingsDialog extends JDialog {
 
         JPanel wrap = new JPanel(new BorderLayout());
         wrap.setBackground(UI.BACKGROUND);
-        wrap.add(languagePanel, BorderLayout.NORTH);
+        javax.swing.JPanel column = new javax.swing.JPanel();
+        column.setBackground(UI.BACKGROUND);
+        column.setLayout(new BoxLayout(column, BoxLayout.Y_AXIS));
+        column.add(languagePanel);
+        column.add(Box.createVerticalStrut(8));
+        column.add(buildFontPanel());
+        wrap.add(column, BorderLayout.NORTH);
         return wrap;
+    }
+
+    /**
+     * 字体文件分组（2026-11-12）。
+     *
+     * <p>把 .ttf/.otf/.ttc 放进字体目录即可让界面显示该语言文字，不需要在系统里安装字体。
+     * 这里给出目录路径、已载入字族、"打开目录"和"重新扫描"。</p>
+     */
+    private JPanel buildFontPanel() {
+        fontPanel = new JPanel();
+        fontPanel.setBorder(BorderFactory.createTitledBorder(Localization.t("settings.fonts.group")));
+        fontPanel.setBackground(UI.BACKGROUND);
+        fontPanel.setLayout(new BoxLayout(fontPanel, BoxLayout.Y_AXIS));
+
+        FontFiles.ensurePrimaryDir();
+        fontDirLabel = new JLabel(Localization.t("settings.fonts.dir") + " "
+                + FontFiles.primaryDir().getAbsolutePath());
+        fontDirLabel.setFont(Fonts.text("Dialog", java.awt.Font.PLAIN, 11));
+        fontPanel.add(fontDirLabel);
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        buttons.setBackground(UI.BACKGROUND);
+        fontOpenButton = new JButton(Localization.t("settings.fonts.open"));
+        fontOpenButton.addActionListener((ActionEvent e) -> openFontsDir());
+        fontRescanButton = new JButton(Localization.t("settings.fonts.rescan"));
+        fontRescanButton.addActionListener((ActionEvent e) -> rescanFonts());
+        buttons.add(fontOpenButton);
+        buttons.add(fontRescanButton);
+        fontPanel.add(buttons);
+
+        fontStatusLabel = new JLabel();
+        fontStatusLabel.setFont(Fonts.text("Dialog", java.awt.Font.PLAIN, 11));
+        fontPanel.add(fontStatusLabel);
+        updateFontStatus();
+
+        fontPreferBox = new JCheckBox(Localization.t("settings.fonts.prefer"));
+        fontPreferBox.setOpaque(false);
+        fontPreferBox.setSelected(FontFiles.isPreferFile());
+        fontPreferBox.addActionListener((ActionEvent e) -> {
+            FontFiles.setPreferFile(fontPreferBox.isSelected());
+            Fonts.init();
+            repaintAllWindows();
+            updateFontStatus();
+        });
+        fontPanel.add(fontPreferBox);
+
+        fontHint = new JLabel(Localization.t("settings.fonts.hint"));
+        fontHint.setFont(Fonts.text("Dialog", java.awt.Font.PLAIN, 11));
+        fontPanel.add(fontHint);
+
+        return fontPanel;
+    }
+
+    /** 刷新"已载入 N 个字族"这一行 */
+    private void updateFontStatus() {
+        if (fontStatusLabel == null) {
+            return;
+        }
+        List<String> fams = FontFiles.families();
+        StringBuilder sb = new StringBuilder();
+        sb.append(Localization.t("settings.fonts.loaded")).append(": ").append(fams.size());
+        if (!fams.isEmpty()) {
+            int shown = Math.min(fams.size(), 5);
+            sb.append(" — ").append(String.join(", ", fams.subList(0, shown)));
+            if (fams.size() > shown) {
+                sb.append(" …");
+            }
+        }
+        fontStatusLabel.setText(sb.toString());
+    }
+
+    /** 打开字体目录（不存在时先创建） */
+    private void openFontsDir() {
+        try {
+            FontFiles.ensurePrimaryDir();
+            java.awt.Desktop.getDesktop().open(FontFiles.primaryDir());
+        } catch (Throwable t) {
+            javax.swing.JOptionPane.showMessageDialog(this,
+                    Localization.t("settings.fonts.openFailed") + "\n"
+                            + FontFiles.primaryDir().getAbsolutePath() + "\n" + t,
+                    Localization.t("settings.fonts.group"),
+                    javax.swing.JOptionPane.WARNING_MESSAGE);
+        }
+    }
+
+    /** 重新扫描字体目录并立即生效（含已打开的窗口） */
+    private void rescanFonts() {
+        int count = FontFiles.reload();
+        Fonts.init();
+        updateFontStatus();
+        repaintAllWindows();
+        javax.swing.SwingUtilities.updateComponentTreeUI(this);
+        applyTexts();
+        System.out.println("[Fonts] 重新扫描完成：" + count + " 个字族");
+    }
+
+    /** 仪器库在绘制时才取字体，改完字族必须重画所有窗口 */
+    private void repaintAllWindows() {
+        for (Window w : Window.getWindows()) {
+            if (w.isDisplayable()) {
+                javax.swing.SwingUtilities.updateComponentTreeUI(w);
+                w.repaint();
+            }
+        }
     }
 
     private void onLanguageSelected(Language lang) {
@@ -613,6 +869,7 @@ public class SettingsDialog extends JDialog {
         }
         javax.swing.SwingUtilities.updateComponentTreeUI(this);   // 本对话框按新语言重刷
         applyTexts();
+        updateFontStatus();                                        // 字体可能因语言变化重新选取
     }
 
     // ---------------- 模组 ----------------

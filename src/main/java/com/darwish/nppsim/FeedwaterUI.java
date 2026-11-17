@@ -17,6 +17,36 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
     /**
      * Creates new form CondensateUI
      */
+    /**
+     * 汽包水位表统一整定（2026-11-05，与 MCC 的新水位口径配套）。
+     *
+     * <p>量程 −60 … +100 %，口径是<b>相对额定水装的偏差</b>：</p>
+     * <pre>
+     *   0 %   = 正常水位  200 t（两鼓水位在中心线上约 200 mm）
+     *   +100 %= 满水事故线 440 t（表盘满量程；物理上限约 +35 %，即 285 t）
+     *   −100 %= 空（0 t）
+     * </pre>
+     *
+     * <p>刻度上画两段红区，与报警阈值（±25 %，见 update() 里的 drum1Low/High）一致：
+     * 低 −60…−25 %、高 +25…+100 %。以前只有一段 track 红条，高水位那一侧完全没有标记，
+     * 水位冲上去也看不出来。</p>
+     */
+    private static void setupDrumLevelGauge(eu.hansolo.steelseries.gauges.Linear g) {
+        g.setMinValue(-60.0);
+        g.setMaxValue(100.0);
+        g.setUnitString("%");
+        g.setValueColor(eu.hansolo.steelseries.tools.ColorDef.YELLOW);
+        /* 不用 track 画红区（track 只能一段，会盖掉另一侧）；track 关掉，
+         * 危险区改用刻度区段标，两段都能画。 */
+        g.setTrackVisible(false);
+        g.setTickmarkSectionsVisible(true);
+        g.resetTickmarkSections();
+        java.awt.Color red = new java.awt.Color(255, 0, 0);
+        g.addTickmarkSection(new eu.hansolo.steelseries.tools.Section(-60.0, -25.0, red));
+        g.addTickmarkSection(new eu.hansolo.steelseries.tools.Section(25.0, 100.0, red));
+        g.setToolTipText("0 % = 正常水位 200 t；+100 % = 满水事故线 440 t（物理上限约 +35 %，285 t）");
+    }
+
     public FeedwaterUI() {
         initComponents();
         this.setTitle(Localization.t("Feedwater Control"));
@@ -48,6 +78,11 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
                 stopAuxFWP.setSelected(true);
             }
         });
+        // "开始/停止" 单选钮换成槽式拨杆（2026-11-15）：面板加宽 130，数显右移
+        PumpSwitchPanel.installPicker(startMFWP.getParent(), mFWPSpinner,
+                mainFeedwaterPumps, Localization.t("Main feedwater pump"), 130);
+        PumpSwitchPanel.installPicker(startAuxFWP.getParent(), auxFWPSpinner,
+                auxFeedwaterPumps, Localization.t("Aux feedwater pump"), 130);
         mFW1Spinner.addChangeListener((ChangeEvent e) -> {
             WaterValve currentSelection = mainFeederValves.get((int)mFW1Spinner.getValue() - 1);
             switch (currentSelection.getState()) {
@@ -117,9 +152,6 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
     }
     
     
-    /** 给水系统排水阀面板（主给水母管 → 除盐水箱，开阀亮红色"排水阀开启"） */
-    private DrainValvePanel feedwaterDrainPanel;
-
     @Override
     public void update() {
         checkAlarms();
@@ -143,9 +175,6 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
                 flow6.setLcdValue(mainFeederValves.get(5).timestepFlow * 20);
                 auxFlow1.setLcdValue(auxFeederValves.get(0).timestepFlow * 20);
                 auxFlow2.setLcdValue(auxFeederValves.get(1).timestepFlow * 20);
-                if (feedwaterDrainPanel != null) {
-                    feedwaterDrainPanel.refresh();
-                }
             });
         }
     }
@@ -255,9 +284,12 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
             }
         }
         annunciator.setTrigger(auxCavitation, auxCavit);
-        // 给水系统排水阀开启 → 红色报警（自动排水时提醒）
+        /* 给水系统排水阀：与凝结水系统同一套做法（2026-11-04）——
+         * 已改成纯自动（面板上不再有它的操作框），只有阀门真的在排水时才亮红色报警，
+         * 避免"阀开着但没流量"也一直响。 */
         annunciator.setTrigger(NPPSim.feedwaterDrainValve != null
-                && NPPSim.feedwaterDrainValve.getPosition() > 0.01f, drainOpen);
+                && NPPSim.feedwaterDrainValve.getPosition() > 0.01f
+                && NPPSim.feedwaterDrainValve.timestepFlow > 0.0, drainOpen);
     }
     
      /**
@@ -924,25 +956,15 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
         drumLevel1.setFrameVisible(false);
         drumLevel1.setLcdVisible(false);
         drumLevel1.setLedVisible(false);
-        drumLevel1.setMaxValue(50.0);
-        drumLevel1.setMinValue(-50.0);
         drumLevel1.setTitle(Localization.t("FeedwaterUI.drumLevel1.title")); // NOI18N
-        drumLevel1.setTrackSectionColor(new java.awt.Color(255, 0, 0));
-        drumLevel1.setTrackStartColor(new java.awt.Color(255, 0, 0));
-        drumLevel1.setUnitString("%");
-        drumLevel1.setValueColor(eu.hansolo.steelseries.tools.ColorDef.YELLOW);
+        setupDrumLevelGauge(drumLevel1);
 
         drumLevel2.setBackgroundColor(eu.hansolo.steelseries.tools.BackgroundColor.SATIN_GRAY);
         drumLevel2.setFrameVisible(false);
         drumLevel2.setLcdVisible(false);
         drumLevel2.setLedVisible(false);
-        drumLevel2.setMaxValue(50.0);
-        drumLevel2.setMinValue(-50.0);
         drumLevel2.setTitle(Localization.t("FeedwaterUI.drumLevel2.title")); // NOI18N
-        drumLevel2.setTrackSectionColor(new java.awt.Color(255, 0, 0));
-        drumLevel2.setTrackStartColor(new java.awt.Color(255, 0, 0));
-        drumLevel2.setUnitString("%");
-        drumLevel2.setValueColor(eu.hansolo.steelseries.tools.ColorDef.YELLOW);
+        setupDrumLevelGauge(drumLevel2);
 
         mainFWFlow1.setBackgroundColor(eu.hansolo.steelseries.tools.BackgroundColor.SATIN_GRAY);
         mainFWFlow1.setFrameVisible(false);
@@ -1655,17 +1677,8 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
 
         javax.swing.GroupLayout jPanel3Layout = new javax.swing.GroupLayout(jPanel3);
         jPanel3.setLayout(jPanel3Layout);
-        feedwaterDrainPanel = new DrainValvePanel(
-                Localization.t("Feedwater System Drain"),
-                NPPSim.feedwaterDrainValve,
-                null);   // 报警在左上角 annunciator（drainOpen 灯），不放在面板里
-
         jPanel3Layout.setHorizontalGroup(
             jPanel3Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
-            .addGroup(jPanel3Layout.createSequentialGroup()
-                .addContainerGap()
-                .addComponent(feedwaterDrainPanel, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
-                .addContainerGap())
             .addGroup(jPanel3Layout.createSequentialGroup()
                 .addGroup(jPanel3Layout.createParallelGroup(javax.swing.GroupLayout.Alignment.LEADING)
                     .addGroup(jPanel3Layout.createSequentialGroup()
@@ -1747,8 +1760,6 @@ public class FeedwaterUI extends javax.swing.JFrame implements UIUpdateable {
                             .addComponent(jPanel24, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)
                             .addComponent(jPanel26, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, Short.MAX_VALUE)))
                     .addComponent(jPanel27, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE))
-                .addPreferredGap(javax.swing.LayoutStyle.ComponentPlacement.RELATED)
-                .addComponent(feedwaterDrainPanel, javax.swing.GroupLayout.PREFERRED_SIZE, javax.swing.GroupLayout.DEFAULT_SIZE, javax.swing.GroupLayout.PREFERRED_SIZE)
                 .addContainerGap(88, Short.MAX_VALUE))
         );
 

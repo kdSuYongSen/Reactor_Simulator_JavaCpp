@@ -19,6 +19,17 @@ import org.json.JSONObject;
 public final class Manifest {
 
     /** 一个组件节点（方块也算节点，path 为空串） */
+    /** 把清单里的 bg/fg 读进节点（同时记为"原始值"，供恢复默认用） */
+    static void applyColors(Node n, JSONObject src) {
+        String bg = src.optString("bg", "");
+        String fg = src.optString("fg", "");
+        n.bg = bg.isEmpty() ? null : bg;
+        n.fg = fg.isEmpty() ? null : fg;
+        n.defBg = n.bg;
+        n.defFg = n.fg;
+        n.colorDirty = false;
+    }
+
     public static final class Node {
         public final String blockId;
         public final String path;          // "0/2" 相对所属方块；方块本身是 ""
@@ -33,6 +44,21 @@ public final class Manifest {
         public boolean visible;
         /** 是否改过（决定写盘时是否落到 children / nodes） */
         public boolean dirty;
+        /** 背景 / 前景色（"#RRGGBB"，null = 不设置） */
+        public String bg, fg;
+        /** 清单里带回来的原始颜色（"恢复默认"用） */
+        public String defBg, defFg;
+        /** 颜色被手工改过（单独标记：只改颜色不改位置时也要写盘） */
+        public boolean colorDirty;
+
+        /** 颜色是否与初始值不同 */
+        public boolean colorChanged() {
+            return !eq(bg, defBg) || !eq(fg, defFg);
+        }
+
+        private static boolean eq(String a, String b) {
+            return a == null ? b == null : a.equalsIgnoreCase(b);
+        }
 
         Node(String blockId, String path, String cls, String label,
              int x, int y, int w, int h, boolean visible) {
@@ -58,6 +84,9 @@ public final class Manifest {
             w = defW;
             h = defH;
             visible = defVisible;
+            bg = defBg;
+            fg = defFg;
+            colorDirty = false;
             dirty = false;
             for (Node c : children) {
                 c.reset();
@@ -196,6 +225,7 @@ public final class Manifest {
                     Node n = new Node(id, "", b.optString("cls", ""), b.optString("label", ""),
                             b.optInt("x", 0), b.optInt("y", 0),
                             b.optInt("w", 1), b.optInt("h", 1), b.optBoolean("visible", true));
+                    applyColors(n, b);
                     readChildren(n, b.optJSONArray("children"), "");
                     page.blocks.add(n);
                 }
@@ -219,6 +249,7 @@ public final class Manifest {
             Node n = new Node(parent.blockId, path, c.optString("cls", ""), c.optString("label", ""),
                     c.optInt("x", 0), c.optInt("y", 0),
                     c.optInt("w", 1), c.optInt("h", 1), c.optBoolean("visible", true));
+            applyColors(n, c);
             readChildren(n, c.optJSONArray("children"), path);
             parent.children.add(n);
         }
@@ -311,6 +342,87 @@ public final class Manifest {
                     c.optInt("x", 0), c.optInt("y", 0),
                     Math.max(1, c.optInt("w", 10)), Math.max(1, c.optInt("h", 10)), true);
             parent.children.add(n);
+        }
+    }
+
+    /**
+     * 把**已保存的布局文件**叠加到清单坐标上（2026-11-03）。
+     *
+     * <p>旧实现只读 {@code ui_layout_pages.json}（模拟器启动时导出的快照）。只要模拟器
+     * 之后又改过布局，清单里的坐标就是旧的：编辑器一打开看到的是旧位置，随便动一下别的方块
+     * 再保存，{@link LayoutWriter} 会把**所有**方块的坐标按旧快照写回去 ——
+     * 之前调好的位置当场被弹回原处，表现就是"改了位置没反应 / 改了又回去"。</p>
+     *
+     * <p>现在选页时把该页布局文件里的坐标读到清单上（标记 dirty，保存时原样写回），
+     * 保证编辑器看到的永远是**当前生效**的位置。</p>
+     */
+    public static void applyExistingLayout(Page page, File dir) {
+        if (page == null || dir == null) {
+            return;
+        }
+        File f = LayoutWriter.targetFile(page, dir);
+        if (!f.isFile()) {
+            return;
+        }
+        try {
+            String text = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            JSONObject root = new JSONObject(text);
+            if (!"absolute".equalsIgnoreCase(root.optString("mode", "group"))) {
+                return;
+            }
+            JSONObject panels = root.optJSONObject("panels");
+            if (panels == null) {
+                return;
+            }
+            for (Node b : page.blocks) {
+                JSONObject o = panels.optJSONObject(b.blockId);
+                if (o == null) {
+                    continue;
+                }
+                applyGeom(b, o);
+                java.util.Map<String, Node> byPath = new java.util.HashMap<>();
+                collectPaths(b, byPath);
+                applyMap(byPath, o.optJSONObject("children"));
+                applyMap(byPath, o.optJSONObject("nodes"));
+            }
+        } catch (Exception ignore) {
+            // 布局文件坏了就按清单坐标显示，不影响编辑
+        }
+    }
+
+    private static void applyMap(java.util.Map<String, Node> byPath, JSONObject map) {
+        if (map == null) {
+            return;
+        }
+        for (java.util.Iterator<String> it = map.keys(); it.hasNext();) {
+            String path = it.next();
+            JSONObject o = map.optJSONObject(path);
+            Node n = byPath.get(path);
+            if (o != null && n != null) {
+                applyGeom(n, o);
+            }
+        }
+    }
+
+    private static void applyGeom(Node n, JSONObject o) {
+        int w = o.optInt("w", 0);
+        int h = o.optInt("h", 0);
+        n.x = o.optInt("x", n.x);
+        n.y = o.optInt("y", n.y);
+        if (w > 0) {
+            n.w = w;
+        }
+        if (h > 0) {
+            n.h = h;
+        }
+        n.visible = o.optBoolean("visible", n.visible);
+        n.dirty = true;      // 保存时原样写回，不会丢
+    }
+
+    private static void collectPaths(Node n, java.util.Map<String, Node> out) {
+        for (Node c : n.children) {
+            out.put(c.path, c);
+            collectPaths(c, out);
         }
     }
 

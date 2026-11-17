@@ -94,18 +94,104 @@ public class Led extends JComponent implements ActionListener {
       }
    }
 
+   /**
+    * 2026-11-14：改成"实心圆灯"画法（金属灯座 + 玻璃灯罩 + 高光 + 发光），
+    * 与电网/柴油窗口里的指示灯同一套外观。
+    */
    @Override
    protected void paintComponent(Graphics var1) {
-      if (this.initialized) {
-         Graphics2D var2 = (Graphics2D)var1.create();
-         var2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-         var2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-         var2.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_NORMALIZE);
-         var2.translate(this.INNER_BOUNDS.x, this.INNER_BOUNDS.y);
-         var2.drawImage(this.getCurrentLedImage(), 0, 0, null);
-         var2.translate(-this.INNER_BOUNDS.x, -this.INNER_BOUNDS.y);
-         var2.dispose();
+      if (!this.initialized) {
+         return;
       }
+      Graphics2D var2 = (Graphics2D)var1.create();
+      var2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+      var2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+      int size = Math.min(this.getWidth(), this.getHeight());
+      if (size < 6) {
+         var2.dispose();
+         return;
+      }
+      float r = size * 0.5f / 1.35f;
+      this.paintLamp(var2, this.getWidth() / 2f, this.getHeight() / 2f, r,
+              this.lensColor(), this.ledOn);
+      var2.dispose();
+   }
+
+   /** 灯罩颜色：按现有 LedColor 语义映射（名称前缀匹配，避免依赖枚举常量名） */
+   private Color lensColor() {
+      String n = this.ledColor == null ? "RED" : this.ledColor.name();
+      if (n.startsWith("GREEN")) {
+         return new Color(64, 214, 122);
+      }
+      if (n.startsWith("BLUE")) {
+         return new Color(70, 150, 255);
+      }
+      if (n.startsWith("YELLOW")) {
+         return new Color(240, 210, 70);
+      }
+      if (n.startsWith("ORANGE")) {
+         return new Color(250, 160, 60);
+      }
+      if (n.startsWith("CYAN")) {
+         return new Color(90, 220, 230);
+      }
+      if (n.startsWith("MAGENTA")) {
+         return new Color(230, 100, 220);
+      }
+      if (n.startsWith("CUSTOM") && this.customLedColor != null) {
+         return this.customLedColor.COLOR;
+      }
+      return new Color(226, 58, 58);
+   }
+
+   private void paintLamp(Graphics2D g, float cx, float cy, float r, Color lens, boolean on) {
+      if (r < 1.5f) {
+         return;
+      }
+      if (on) {
+         float glow = r * 2.0f;
+         g.setPaint(new RadialGradientPaint(new java.awt.geom.Point2D.Float(cx, cy), glow,
+                 new float[]{0f, 0.42f, 1f},
+                 new Color[]{new Color(lens.getRed(), lens.getGreen(), lens.getBlue(), 150),
+                         new Color(lens.getRed(), lens.getGreen(), lens.getBlue(), 42),
+                         new Color(lens.getRed(), lens.getGreen(), lens.getBlue(), 0)}));
+         g.fillOval((int)(cx - glow), (int)(cy - glow), (int)(glow * 2), (int)(glow * 2));
+      }
+      float br = r + Math.max(1.6f, r * 0.34f);
+      g.setPaint(new RadialGradientPaint(
+              new java.awt.geom.Point2D.Float(cx - br * 0.35f, cy - br * 0.4f), br * 1.7f,
+              new float[]{0f, 0.55f, 1f},
+              new Color[]{new Color(250, 246, 234), new Color(214, 206, 186),
+                      new Color(150, 142, 122)}));
+      g.fillOval((int)(cx - br), (int)(cy - br), (int)(br * 2), (int)(br * 2));
+      g.setColor(new Color(96, 90, 78));
+      g.setStroke(new java.awt.BasicStroke(Math.max(0.8f, r * 0.14f)));
+      g.drawOval((int)(cx - br), (int)(cy - br), (int)(br * 2), (int)(br * 2));
+
+      Color dark = mix(lens, Color.BLACK, 0.78f);
+      Color top = on ? mix(lens, Color.WHITE, 0.45f) : mix(dark, Color.WHITE, 0.12f);
+      Color mid = on ? lens : dark;
+      Color bottom = on ? mix(lens, Color.BLACK, 0.32f) : mix(dark, Color.BLACK, 0.35f);
+      g.setPaint(new RadialGradientPaint(
+              new java.awt.geom.Point2D.Float(cx - r * 0.3f, cy - r * 0.35f), r * 1.7f,
+              new float[]{0f, 0.5f, 1f}, new Color[]{top, mid, bottom}));
+      g.fillOval((int)(cx - r), (int)(cy - r), (int)(r * 2), (int)(r * 2));
+
+      if (r >= 3) {
+         g.setColor(new Color(255, 255, 255, on ? 190 : 70));
+         g.fillOval((int)(cx - r * 0.55f), (int)(cy - r * 0.68f),
+                 Math.max(2, (int)(r * 0.62f)), Math.max(2, (int)(r * 0.46f)));
+      }
+      g.setColor(new Color(0, 0, 0, on ? 70 : 96));
+      g.setStroke(new java.awt.BasicStroke(Math.max(0.7f, r * 0.12f)));
+      g.drawOval((int)(cx - r), (int)(cy - r), (int)(r * 2), (int)(r * 2));
+   }
+
+   private static Color mix(Color a, Color b, float t) {
+      return new Color(
+              Math.round(a.getRed() + (b.getRed() - a.getRed()) * t),
+              Math.round(a.getGreen() + (b.getGreen() - a.getGreen()) * t),
+              Math.round(a.getBlue() + (b.getBlue() - a.getBlue()) * t));
    }
 
    public LedType getLedType() {

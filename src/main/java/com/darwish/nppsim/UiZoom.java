@@ -37,7 +37,7 @@ public final class UiZoom {
     private static final String BASE_KEY = "uiZoom.baseFontSize";
     private static final String PREF_SIZE_KEY = "uiZoom.basePrefSize";
     private static final Preferences PREFS = Preferences.userRoot().node("com/darwish/nppsim");
-    private static final String PREF_ENABLED = "uiZoomEnabled";
+    private static final String PREF_ENABLED = "uiZoomEnabledV2";
 
     /** 各窗口自己的缩放系数（窗口销毁后自动回收） */
     private static final Map<Window, Float> windowScales = new WeakHashMap<>();
@@ -53,7 +53,10 @@ public final class UiZoom {
 
     public static void init() {
         defaultScale = 1.0f;            // 缩放不持久化：每次重启自动重置
-        enabled = PREFS.getBoolean(PREF_ENABLED, true);
+        /* 默认关闭（2026-11-03 晚）：整页缩放会让界面自己变大并一直保持，
+         * 看着像"自动放大"。默认保持 1:1，要放大就用长按放大镜（ZoomLoupe）；
+         * 确实想整页缩放的话，在 设置→游戏 里勾上即可，这里只是不再默认开启。 */
+        enabled = PREFS.getBoolean(PREF_ENABLED, false);
         if (!installed) {
             installed = true;
             /* 缩放后子组件的脏区是未缩放的组件坐标，必须换算成层坐标 —— 否则报警灯
@@ -164,13 +167,18 @@ public final class UiZoom {
         applyWindow(w, v, anchor);
     }
 
-    /** 新窗口首次显示时套用默认缩放（默认 100% → 空操作） */
+    /**
+     * 新窗口首次显示时的处理。
+     *
+     * <p>以前这里会把"最近一次缩放"套到每个新开的窗口上 —— 结果缩放一次之后，
+     * 之后打开什么窗口都是放大的（像自己放大了）。现在新窗口一律 1:1 起步，
+     * 只有你真的在那个窗口上 Ctrl+滚轮 才会变大。</p>
+     */
     public static void applyDefault(Window w) {
-        if (w == null || defaultScale == 1.0f) {
+        if (w == null) {
             return;
         }
-        windowScales.put(w, defaultScale);
-        applyWindow(w, defaultScale);
+        windowScales.put(w, 1.0f);
     }
 
     /** 设置页的"重置缩放"：所有窗口回到 100%（不持久化） */

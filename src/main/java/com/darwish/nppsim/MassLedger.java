@@ -25,6 +25,13 @@ final class MassLedger {
         if (NPPSim.mcc != null) {
             w += safe(NPPSim.mcc.drum1.getWaterMass());
             w += safe(NPPSim.mcc.drum2.getWaterMass());
+            /* 一回路压力母管（2026-11-02 补入）：每根 121.5 m³，两根合计约 243 t，
+             * 是一回路里最大的水存量。原先没统计，全厂台账少了近一半的一回路水量，
+             * "总量守恒"这句话就站不住。 */
+            w += safe(NPPSim.mcc.pHeader1.getWaterMass());
+            w += safe(NPPSim.mcc.pHeader2.getWaterMass());
+            /* 燃料通道（2026-11-02 补入）：1661 根 × 约 12.5 kg ≈ 21 t */
+            w += coreChannelWaterKg();
         }
         /* 用索引遍历而不是 for-each：这些列表由仿真线程维护（读档时会 clear/重建），
          * for-each 会抛 ConcurrentModificationException（界面刷新线程曾因此报错）。 */
@@ -77,6 +84,23 @@ final class MassLedger {
         }
         if (NPPSim.tg2 != null && NPPSim.tg2.condenser != null) {
             w += safe(NPPSim.tg2.condenser.getHotwellMassKg());
+        }
+        return w;
+    }
+
+    /** 堆芯 1661 根燃料通道里的冷却剂 kg */
+    static double coreChannelWaterKg() {
+        double w = 0;
+        if (NPPSim.core == null) {
+            return 0.0;
+        }
+        for (java.util.ArrayList<Channel> row : NPPSim.core.coreArray) {
+            for (int i = 0; i < row.size(); i++) {
+                Channel c = row.get(i);
+                if (c instanceof FuelChannel) {
+                    w += safe(((FuelChannel) c).getWaterMass());
+                }
+            }
         }
         return w;
     }

@@ -37,7 +37,7 @@ class PressureHeader extends WaterSteamComponent implements Connectable, UIReada
             if (pressureSum == 0) {
                 sourceOutflow = 0;
             }
-            thisSource.updateFlow(sourceOutflow);
+            thisSource.assignFlow(sourceOutflow);   // 2026-11-04：改成持久指派，泵下一 tick 按需输送
         }
         if (waterTemperature < 0 || waterTemperature > 300) {
             int e = 0;
@@ -261,6 +261,20 @@ class SimpleSuctionHeader extends WaterSteamComponent implements Connectable, UI
         waterTemperature = forcedInflowData[1];
         waterMass -= waterOutflow;
         waterOutflow = initialWaterMass - waterMass;
+        /* 按源端可供量限流（2026-11-04）：给水泵只能抽走源里真有的水。
+         * 原来母管不看源端存量，给水流量大于凝结水回收时会把除氧器抽到负水位。 */
+        double available = 0.0;
+        boolean limited = false;
+        for (Connectable source : sources) {
+            if (source instanceof WaterSupplyLimit) {
+                available += ((WaterSupplyLimit) source).availableWaterKg();
+                limited = true;
+            }
+        }
+        if (limited && waterOutflow > available) {
+            waterMass += (waterOutflow - available);   // 抽不到的补回母管，守恒
+            waterOutflow = available;
+        }
         //double waterMass = initialWaterMass;
         isolationValveArray.forEach(valve -> {
             valve.update();

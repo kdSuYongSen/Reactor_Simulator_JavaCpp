@@ -35,6 +35,19 @@ class LPHeater implements Connectable, Serializable {
 
     private double demand = 0.0;                 // 下游登记的取水 kg/tick
     private double waterTemperature = 36.5;      // 出口水温（下游读这个）
+    /**
+     * 水侧压力 MPa（2026-11-02 环路自检修）。
+     *
+     * <p>壳侧是 0.13 MPa（抽汽侧），但**水侧**在凝结水泵之后、除氧器之前，
+     * 压力由凝结水泵的扬程决定（原版接线里除氧器进水阀的前件就是凝结水联箱，
+     * 压力约 1.87 MPa）。用壳侧压力当水侧压力，会让"低压加热器 → 除氧器"
+     * 这条主给水路的压差变成 0.13 − 0.53 = −0.40 MPa，阀门公式判为无压差，
+     * **水永远过不去** —— 除氧器只能靠除盐水箱补水，运行几十秒就见底，
+     * 二次侧随即无汽、汽轮机出力归零。</p>
+     *
+     * <p>所以这里单独跟踪水侧压力（取自上游联箱），壳侧压力仍只用于汽侧计算。</p>
+     */
+    private double waterSidePressure = 0.5;
     private double throughputKgs = 0.0;
     private double extractionKgs = 0.0;
 
@@ -66,6 +79,10 @@ class LPHeater implements Connectable, Serializable {
         demand = 0.0;
 
         double tIn = (upstream != null) ? upstream.getWaterTemperature() : waterTemperature;
+        if (upstream != null) {
+            // 水侧压力跟随上游（凝结水联箱，受凝结水泵扬程驱动）
+            waterSidePressure = upstream.getPressure();
+        }
         if (upstream != null && take > 0.0) {
             upstream.updateWaterOutflow(take, tIn);
         }
@@ -137,7 +154,13 @@ class LPHeater implements Connectable, Serializable {
     @Override public void updateSteamInflow(double flow, double tempC) { }
     @Override public void updateSteamOutflow(double flow, double tempC) { }
 
-    @Override public double getPressure() { return SHELL_PRESSURE_MPA; }
+    /**
+     * 对外压力 = **水侧**压力（2026-11-02 环路自检修）。
+     *
+     * <p>下游（除氧器进水阀）关心的是水侧压差；壳侧 0.13 MPa 只用于汽侧
+     * 抽汽温度的计算，不作为连接件的对外压力。</p>
+     */
+    @Override public double getPressure() { return Math.max(SHELL_PRESSURE_MPA, waterSidePressure); }
     @Override public double getSteamDensity() {
         return Loader.tables.getSteamDensityByPressure(SHELL_PRESSURE_MPA);
     }

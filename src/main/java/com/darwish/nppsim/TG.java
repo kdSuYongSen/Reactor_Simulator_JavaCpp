@@ -19,11 +19,63 @@ class TG extends WaterSteamComponent implements Connectable {
     private double casingTemp, turbineTemp, load;
     private double steamInletPressure = 0.0, steamOutLetPressure = 0.0;
     private double steamInflowTemperature = 20.0, steamOutflowTemperature = 20.0;
-    private float rpm = 0.0f;
+    /** 转速 rpm（包内可见：保护逻辑与自检工具需要直接置值做超速试验） */
+    float rpm = 0.0f;
     private boolean synced = false, tripped = true, reversePower = false;
     private static float gridPhase = 180.0f;
     private float genPhase = 0.0f, genAlignment;
     private boolean isTG1 = false, reversePowerRecorded = false;
+    /** 本机保护（真实保护清单，见 TurbineProtection） */
+    final TurbineProtection protection = new TurbineProtection();
+
+    /* ================================================================
+     * 润滑油系统（2026-11-16 新增）
+     *
+     * 与应急柴油机同一套做法：A = 交流主油泵（厂用 380 V 供电），
+     * B = 直流事故油泵（220 V 直流母线供电）。母管油压由"泵台数 +
+     * 主轴泵残压"决定，油压低于 0.8 bar 持续 3 s 由 TurbineProtection 跳机。
+     *
+     * 主轴泵（轴承润滑油泵）在额定转速附近只补一小部分压力：足够维持惰走，
+     * 但不足以替代 A/B 泵 —— 这样"停错泵会跳机"在满负荷时也成立。
+     * ================================================================ */
+    /** 主油泵 A（交流）开关位置 */
+    private boolean lubePumpA = true;
+    /** 事故油泵 B（直流）开关位置 */
+    private boolean lubePumpB = false;
+    /** B 泵低油压自启联锁 */
+    private boolean lubeStandbyAuto = true;
+    /** 单泵额定油压 bar */
+    static final double LUBE_RATED_BAR = 2.6;
+    /** B 泵联锁动作油压 bar（低于此值自动启事故泵） */
+    static final double LUBE_STANDBY_BAR = 1.6;
+    /** 母管油压 bar（表压） */
+    private double lubePress = LUBE_RATED_BAR;
+    /** 润滑油温 °C */
+    private double lubeOilTemp = 42.0;
+    /** 泵实际在转（含电源可用性判断，指示灯用它） */
+    private boolean lubePumpARunning, lubePumpBRunning;
+    /** 联锁自启只报一次事件，油压恢复后复位 */
+    private boolean lubeStandbyAnnounced = false;
+    /** 老存档兼容：旧档没有油泵字段，第一次 update 补一个"主泵已投"的初态 */
+    private boolean lubeInitialised = false;
+    /**
+     * 装载标准初始工况后的**启动旁路**（tick 数，2026-11-03）。
+     *
+     * <p>装载工况是"一步到位"并网：rpm 立刻置 3000、synced 置 true，可主蒸汽要十几秒
+     * 才从分离器走到汽轮机，凝汽器压力也要下一帧才按抽完真空重算。这段时间里
+     * 三条按稳态设计的保护都会误动作：</p>
+     * <ul>
+     *   <li>逆功率：进汽 0 而空载汽耗按 20 kg/s 算 → 功率 −16 MWe → 7 s 后跳机；</li>
+     *   <li>低真空：凝汽器压力还是上一帧的 0.101 MPa → 立刻判"真空低"跳机；</li>
+     *   <li>低汽包压力：给水回路还没建立，汽包在几秒内可能瞬时低于 5 MPa。</li>
+     * </ul>
+     * <p>真实现场是"先抽真空 → 冲转 → 并网 → 加负荷"的连续过程，不存在这个台阶。
+     * 所以装载时给 60 s 旁路，之后保护照常。</p>
+     */
+    /** 装载标准工况用：给启动保护一段旁路时间（tick 数，50 ms/tick） */
+    void suppressStartupProtection(int ticks) {
+        protection.suppressStartupProtection(ticks);
+    }
 
     /* ================================================================
      * 出力/转速标定（2026-10-17 由经验线性式改为按焓降计算）
@@ -64,18 +116,22 @@ class TG extends WaterSteamComponent implements Connectable {
      *  同一个函数同时用于"到凝汽器"和"到抽汽口"，保证两段功口径一致。
      *  验证台可直接调用，与运行时是同一套计算。 */
     static double specificWorkKjPerKg(double tInC, double pOutMPa) {
-        if (NPPSim.tables == null) return 0.0;
+        /* 汽水表可能在 NPPSim 建好之前就被调用（数值自检 TurbineCheck），
+         * 那时 NPPSim.tables 还是 null，退回 Loader.tables（程序一启动就建好了）。
+         * 原来只认 NPPSim.tables，自检里一律算出 0 kJ/kg。 */
+        SteamTables tb = NPPSim.tables != null ? NPPSim.tables : Loader.tables;
+        if (tb == null) return 0.0;
         double tIn = Math.max(1.0, Math.min(372.0, tInC));
         double pOut = Math.max(0.004, Math.min(6.0, pOutMPa));
-        double sIn = NPPSim.tables.getSteamEntropyByTemperature(tIn);
-        double tOut = NPPSim.tables.getSteamTemperatureByPressure(pOut);
-        double sf = NPPSim.tables.getWaterEntropyByTemperature(tOut);
-        double sfg = NPPSim.tables.getVaporizationEntropyByTemperature(tOut);
+        double sIn = tb.getSteamEntropyByTemperature(tIn);
+        double tOut = tb.getSteamTemperatureByPressure(pOut);
+        double sf = tb.getWaterEntropyByTemperature(tOut);
+        double sfg = tb.getVaporizationEntropyByTemperature(tOut);
         double x = (sIn - sf) / Math.max(1e-6, sfg);
         x = Math.max(0.0, Math.min(1.0, x));
-        double hf = NPPSim.tables.getWaterEnthalpyByTemperature(tOut);
-        double hfg = NPPSim.tables.getSpecificVaporEnthalpyByTemperature(tOut);
-        double hIn = NPPSim.tables.getSteamEnthalpyByTemperature(tIn);
+        double hf = tb.getWaterEnthalpyByTemperature(tOut);
+        double hfg = tb.getSpecificVaporEnthalpyByTemperature(tOut);
+        double hIn = tb.getSteamEnthalpyByTemperature(tIn);
         return Math.max(0.0, hIn - (hf + x * hfg)) * ISENTROPIC_EFFICIENCY;
     }
 
@@ -176,9 +232,22 @@ class TG extends WaterSteamComponent implements Connectable {
         tripped = true;
     }
     
+    /**
+     * 无条件解除跳闸（仅供"装载标准初始工况"使用，2026-11-03）。
+     *
+     * <p>{@link #reset()} 要求凝汽器压力 < 0.030 MPa，而凝汽器压力是 update() 里
+     * 按汽空间算出来的 —— 标准工况在同一个调用里刚抽完真空，压力还没重算，
+     * reset() 会判"没有真空"而失败，界面就一直显示汽机跳闸。</p>
+     */
+    void forceReset() {
+        tripped = false;
+        protection.reset();
+    }
+
     protected void reset() {
         if (rpm < 3250 && condenser.getPressure() < 0.030 && mcc.drum1.getPressure() > 5 && mcc.drum2.getPressure() > 5) {
             tripped = false;
+            protection.reset();
             if (isTG1) {
                 autoControl.recordEvent(Localization.t("TG-1 Reset"));
             } else {
@@ -235,23 +304,14 @@ class TG extends WaterSteamComponent implements Connectable {
                 rpm = 0;
             }
         }
-        if (rpm > 3250) {
-            trip("High RPM");
-        }
-        if (rpm > 300 && condenser.getPressure() > 0.030) {   // 仅在汽轮机运转时保护（启动时常压不跳闸）
-            trip("Condenser Vacuum Low");
-        }
-        if (rpm > 300 && (mcc.drum1.getPressure() < 5 || mcc.drum2.getPressure() < 5)) {   // 同上：停机状态汽包未建立压力，不跳闸
-            trip("Low Drum Pressure");
-        }
-        if (load > 825) {
-            trip("High Generator Load");
-        }
-        
-        reversePower = load < 0;
-        if (reversePower) {
-            reversePowerTrip();
-        }
+        /* ---- 润滑油系统（保护要读最新的母管油压，必须先于保护评估）---- */
+        updateLubeOil(0.05);
+        /* ---- 保护（2026-11-03 全部改由 TurbineProtection 统一评估）----
+         * 原来的判据散在这里：超速 3250、真空 0.030、汽包 5 MPa、过负荷 825、
+         * 逆功率（另开线程 sleep 7 s）。现在集中到 TurbineProtection，
+         * 并按真实机组补齐了"机械超速脱扣 111.5%"，且面板可以投退电气保护。 */
+        protection.evaluate(this, 0.05);
+        reversePower = load < 0.0 && isSynced() && !isTripped();
         lastStepSteamInflow = steamInflow;
         steamOutflow = Math.max(0.0, steamInflow - extTick);   // 抽汽之后的余汽进凝汽器
         /* 排汽温度 = 凝汽器压力下的饱和温度（不是"进汽温度 × 0.92"这种拍脑袋系数）。
@@ -328,6 +388,16 @@ class TG extends WaterSteamComponent implements Connectable {
     public boolean isTripped() {
         return tripped;
     }
+
+    /** 是否已并网（保护里"低主汽压力/逆功率"只在并网后判） */
+    public boolean isSynced() {
+        return synced;
+    }
+
+    /** 本机保护对象（汽轮机保护面板读写它） */
+    TurbineProtection getProtection() {
+        return protection;
+    }
     
     public double getSteamInflow() {
         return lastStepSteamInflow;
@@ -344,6 +414,135 @@ class TG extends WaterSteamComponent implements Connectable {
     
     public boolean isReversePower() {
         return reversePower;
+    }
+
+    // ================================================================
+    // 润滑油系统（A = 交流主油泵 / B = 直流事故油泵）
+    // ================================================================
+
+    /** 每帧推进润滑油系统：泵组 → 母管油压 → 油温 */
+    private void updateLubeOil(double dt) {
+        if (!lubeInitialised) {
+            // 旧存档没有这几个字段：按"主泵已投、油压已建立"补齐
+            lubeInitialised = true;
+            lubePumpA = true;
+            lubePumpB = false;
+            lubePress = LUBE_RATED_BAR;
+        }
+        ElectricalGrid grid = NPPSim.grid;
+        boolean acOk = grid == null || grid.has380();     // 主油泵接厂用 380 V
+        boolean dcOk = grid == null || grid.hasDC();      // 事故油泵接 220 V 直流
+        lubePumpARunning = lubePumpA && acOk;
+        lubePumpBRunning = lubePumpB && dcOk;
+
+        /* ---- B 泵联锁：母管油压低于 1.6 bar（主泵停运或失去交流）自动启 ---- */
+        if (lubeStandbyAuto && dcOk && !lubePumpBRunning && lubePress < LUBE_STANDBY_BAR) {
+            lubePumpB = true;
+            lubePumpBRunning = true;
+            if (!lubeStandbyAnnounced) {
+                lubeStandbyAnnounced = true;
+                event(tag() + " standby lube oil pump B auto-start - low oil pressure");
+            }
+        } else if (lubePress >= LUBE_STANDBY_BAR + 0.4) {
+            lubeStandbyAnnounced = false;
+        }
+
+        int pumps = (lubePumpARunning ? 1 : 0) + (lubePumpBRunning ? 1 : 0);
+        /* 主轴泵：额定转速附近才有效，最多补 0.5 bar —— 够惰走，替代不了 A/B 泵。
+         * 所以满负荷下把两台泵都停掉，3 s 后照样因低油压跳机。 */
+        double shaft = rpm > 1500 ? Math.min(1.0, (rpm - 1500) / 1500.0) * 0.5 : 0.0;
+        double target = pumps == 0 ? shaft
+                : LUBE_RATED_BAR + 0.35 * (pumps - 1) + shaft;
+        // 起泵升压 2.0 bar/s；失压 0.45 bar/s（2.6 → 0.8 约 4 s，正好越过 3 s 保护延时）
+        lubePress = stepTo(lubePress, target, dt, pumps > 0 ? 2.0 : 0.45);
+
+        /* 油温：空载 42 °C、满负荷 58 °C，τ≈150 s */
+        double loadRatio = Math.min(1.0, Math.max(0.0, load / 1000.0));
+        lubeOilTemp = thermalStep(lubeOilTemp, 42.0 + 16.0 * loadRatio, dt, 150.0);
+    }
+
+    private String tag() {
+        return isTG1 ? "TG-1" : "TG-2";
+    }
+
+    private void event(String text) {
+        if (autoControl != null) {
+            autoControl.recordEvent(text);
+        }
+    }
+
+    private static double stepTo(double cur, double target, double dt, double ratePerSec) {
+        double d = target - cur;
+        double max = ratePerSec * dt;
+        return Math.abs(d) <= max ? target : cur + Math.signum(d) * max;
+    }
+
+    private static double thermalStep(double cur, double target, double dt, double tau) {
+        return cur + (target - cur) * (1.0 - Math.exp(-dt / Math.max(1e-6, tau)));
+    }
+
+    /** 母管油压 bar（保护与仪表共用） */
+    double getLubePress() {
+        return lubePress;
+    }
+
+    /** 润滑油温 °C */
+    double getLubeOilTemp() {
+        return lubeOilTemp;
+    }
+
+    /** 主油泵 A 开关位置 */
+    boolean isLubePumpA() {
+        return lubePumpA;
+    }
+
+    /** 事故油泵 B 开关位置 */
+    boolean isLubePumpB() {
+        return lubePumpB;
+    }
+
+    /** A 泵实际在转（开关合上且交流有电） */
+    boolean isLubePumpARunning() {
+        return lubePumpARunning;
+    }
+
+    /** B 泵实际在转（开关合上且直流有电） */
+    boolean isLubePumpBRunning() {
+        return lubePumpBRunning;
+    }
+
+    /** 本机正在供油的泵台数 */
+    int getLubePumpCount() {
+        return (lubePumpARunning ? 1 : 0) + (lubePumpBRunning ? 1 : 0);
+    }
+
+    /** B 泵低油压自启联锁是否投入 */
+    boolean isLubeStandbyAuto() {
+        return lubeStandbyAuto;
+    }
+
+    void setLubePumpA(boolean on) {
+        if (lubePumpA == on) {
+            return;
+        }
+        lubePumpA = on;
+        event(tag() + " lube oil pump A " + (on ? "started" : "stopped"));
+    }
+
+    void setLubePumpB(boolean on) {
+        if (lubePumpB == on) {
+            return;
+        }
+        lubePumpB = on;
+        event(tag() + " lube oil pump B " + (on ? "started" : "stopped"));
+    }
+
+    void setLubeStandbyAuto(boolean on) {
+        if (lubeStandbyAuto == on) {
+            return;
+        }
+        lubeStandbyAuto = on;
+        event(tag() + " lube oil pump B auto-start " + (on ? "enabled" : "disabled"));
     }
 
     /** 除氧器抽汽口：汽源是汽轮机中压缸（不是主蒸汽管）。
@@ -430,7 +629,9 @@ class TG extends WaterSteamComponent implements Connectable {
     }
 }
 
-class Condenser extends WaterSteamSubComponent implements Connectable, UIReadable, Serializable, SteamSupplyLimit {
+class Condenser extends WaterSteamSubComponent implements Connectable, UIReadable, Serializable, SteamSupplyLimit, WaterSupplyLimit {
+    /** 冷却水出口温度上限 °C（冷却水侧不可能更热；见 update() 里的说明） */
+    private static final double CW_OUT_MAX_C = 120.0;
     protected final Pump condenserPump;
     /** 本台循环水额定流量（m³/s）；4 台并联时每台分 1/4 */
     final double cwFlowM3s;
@@ -513,6 +714,21 @@ class Condenser extends WaterSteamSubComponent implements Connectable, UIReadabl
         return gasMassKg;
     }
 
+    /**
+     * 热井还能被凝结水泵抽走多少 kg（本 tick 的硬上限，2026-11-04）。
+     *
+     * <p>保底水位 −30 %：凝泵再怎么开也不能把热井抽到这一水位以下。
+     * 这是防数值发散的兜底（正常运行时热井水位由 1A 泵出口阀控制，
+     * 根本到不了这里）。</p>
+     */
+    @Override
+    public double availableWaterKg() {
+        double floorLevel = -30.0;
+        double floorMass = nominalFeedwaterVolume * (1 + floorLevel / 100.0)
+                / Math.max(1e-6, specificDensityFeedwater);
+        return Math.max(0.0, feedwaterMass - floorMass);
+    }
+
     /** 热井存水 kg（区别于 getWaterMass：那是冷却水侧） */
     public double getHotwellMassKg() {
         return feedwaterMass;
@@ -573,7 +789,13 @@ class Condenser extends WaterSteamSubComponent implements Connectable, UIReadabl
 
         // ---- 冷却水温升 → 凝结温度 → 真空 ----
         double dTcw = qMW * 1.0e6 / (mCw * 4180.0);   // MW → W
-        double tCwOut = tCwIn + dTcw;
+        /* 冷却水出口温度必须有物理上限（2026-11-02 环路自检抓到）：
+         * 冷却水泵停机时 mCw 被兜底成 1 kg/s，dTcw = q·1e6/(mCw·cp) 会算出
+         * 上万度，这个温度随后被拿去查水密度 —— 蒸汽表越界 → endSimulation()
+         * → 整个电厂冻结在那一帧（模态窗是在更新线程里弹的）。
+         * 冷却水侧不可能比这更热；"冷却水中断"的物理后果由下面的 tCond 钳位
+         * 体现（真空破坏 → 汽机出力下降），不需要靠一个荒谬的温度。 */
+        double tCwOut = Math.max(tCwIn, Math.min(CW_OUT_MAX_C, tCwIn + dTcw));
         double tCond = Math.max(tCwIn + 3.0, Math.min(120.0, tCwOut + 3.0));   // 端差 3 K
         steamTemperature = tCond;
         if (Boolean.getBoolean("cdbg")) {

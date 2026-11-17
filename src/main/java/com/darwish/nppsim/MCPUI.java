@@ -24,10 +24,31 @@ public class MCPUI extends javax.swing.JFrame implements UIUpdateable {
         led6.setLedOn(mcpArray[5].isActive());
         led7.setLedOn(mcpArray[6].isActive());
         led8.setLedOn(mcpArray[7].isActive());
+        installPumpSwitches();
         initializeDialUpdateThread();
         precisionController();
     }
     
+    /**
+     * 把 8 台主循环泵的 "ON / OFF + Led" 就地换成槽式拨杆开关。
+     *
+     * <p>表单里泵控件装在独立的子面板中（每块 4 台），只替换子面板内部，
+     * 外层的 GroupLayout 与其它控件不受影响。</p>
+     */
+    private void installPumpSwitches() {
+        String pat = Localization.t("Main circulation pump") + " %d";
+        java.awt.Container a = on1.getParent();
+        java.awt.Container b = on5.getParent();
+        if (a == b) {
+            PumpSwitchPanel.install(a, mcpArray, pat, 1);
+        } else {
+            PumpSwitchPanel.install(a,
+                    new Pump[]{mcpArray[0], mcpArray[1], mcpArray[2], mcpArray[3]}, pat, 1);
+            PumpSwitchPanel.install(b,
+                    new Pump[]{mcpArray[4], mcpArray[5], mcpArray[6], mcpArray[7]}, pat, 5);
+        }
+    }
+
     @Override
     public void update() {
         checkAlarms();
@@ -71,6 +92,7 @@ public class MCPUI extends javax.swing.JFrame implements UIUpdateable {
                                 rpm6.setValue(mcpArray[5].getRPM());
                                 rpm7.setValue(mcpArray[6].getRPM());
                                 rpm8.setValue(mcpArray[7].getRPM());
+                                PumpSwitchPanel.syncAll();
                                 pos1.setValue(mcpArray[0].dischargeValve.getPosition() * 100);
                                 pos2.setValue(mcpArray[1].dischargeValve.getPosition() * 100);
                                 pos3.setValue(mcpArray[2].dischargeValve.getPosition() * 100);

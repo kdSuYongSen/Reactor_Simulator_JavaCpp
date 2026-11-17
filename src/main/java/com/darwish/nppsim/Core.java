@@ -25,7 +25,41 @@ public class Core extends Component {
         /** 核心离线冷却系统（PCS 水箱→离线泵 A/B→堆芯→排放），随存档序列化；
          *  旧档反序列化后为 null，update() 里自动补建。 */
         OfflineCoolingSystem offlineCooling = new OfflineCoolingSystem();
+        /** 额定一回路流量 kg/s（与内核 MDOT_NOM 一致） */
+        static final double RATED_FLOW_KGS = 12000.0;
+        /** 标准工况装载后的流量保护期：45 s（900 tick），足够循环流量建立 */
+        static final int RATED_FLOW_GRACE_TICKS = 900;
         private int fuelChannelCount = 0;
+        /**
+         * 装载标准初始工况后的"额定流量保护期"（tick 数，2026-11-02）。
+         *
+         * <p>一回路循环流量在模型里是靠各等容节点的容积偏差逐拍传递建立的：
+         * 主泵起转 → 压力母管 → 1661 根通道 → 汽包 → 吸入母管，实测要约 20~30 s 才到额定。
+         * 而内核一旦拿到"接近 0 的流量"就会立刻把堆芯吹空/空泡化，功率从 4800 MW 掉到几百 MW，
+         * 再也回不来。装载标准工况时先给内核一段额定流量，等实测流量真的建立起来再交给它。</p>
+         */
+        private int icRatedFlowTicks = 0;
+        /**
+         * 标准工况装载后"等着把自动 AZ 投回去"（2026-11-02）。
+         *
+         * <p>不能一到时间就投：整定后的头两分钟里堆芯会先冲到 6 GW 左右，
+         * 再被 АР 拉回 4.8 GW。如果按固定 45 s 恢复保护，AZ-3（5200 MW）立刻动作，
+         * SCRAM 全棒插到底，功率掉到 500 MW —— 实测就是这样。
+         * 所以等到**功率真的回到 AZ-3 定值以下**再投保护。</p>
+         */
+        private boolean icAzRestorePending = false;
+        /** 功率降到这个值以下才把自动 AZ 投回去（AZ-3 定值 5200 MW，留 100 MW 余量） */
+        /**
+         * 装载标准工况后恢复"自动 AZ"的功率阈值 MW（2026-11-04 由 5100 降到 4700）。
+         *
+         * <p>5100 意味着功率一到 5100 以下就恢复自动保护 —— 而单回路整定后的头十几秒
+         * 功率正好在 4800 上下冲，AZ 立刻恢复，紧接着的瞬态冲高就按 AZ-1K「功率 > 120 %」
+         * 把整堆插掉（实测装载后 10 s 内就跳到 400 MW）。改到 4700（低于额定的 98 %）
+         * 并要求连续低于阈值 2 s，瞬态段就不会误投。</p>
+         */
+        static final double AZ_RESTORE_POWER_MW = 4700.0;
+        /** 恢复到阈值以下需要持续的 tick 数（2 s） */
+        private int azRestoreTicks = 0;
 
         public Core() {
             ArrayList<List<String>> coreData = getCoreData();
@@ -49,17 +83,19 @@ public class Core extends Component {
                 ArrayList<Channel> row = coreArray.get(y);
                 for (int x = 0; x < row.size(); x++) {
                     Channel channel = row.get(x);
+                    // 堆芯图行号从上往下（y=0 是顶部），取到笛卡尔距离即可（对称）
+                    double dx = y - cy;
+                    double dy = x - cy;
+                    double rNorm = Math.min(1.0, Math.sqrt(dx * dx + dy * dy) / rMax);
+                    double shape = 1.45 - 0.9 * rNorm * rNorm;
                     if (channel instanceof FuelChannel) {
                         fuelChannelCount++;
-                        FuelChannel fc = (FuelChannel) channel;
-                        // 堆芯图行号从上往下（y=0 是顶部），取到笛卡尔距离即可（对称）
-                        double dx = y - cy;
-                        double dy = x - cy;
-                        double rNorm = Math.min(1.0, Math.sqrt(dx * dx + dy * dy) / rMax);
-                        double shape = 1.45 - 0.9 * rNorm * rNorm;
-                        fc.setRadialShape(shape);
+                        ((FuelChannel) channel).setRadialShape(shape);
                         sum += shape;
                         count++;
+                    } else if (channel instanceof CPSChannel) {
+                        // CPS 通道也要给自己位置上的形状：MTK 的绿点靠它显示通量分布
+                        ((CPSChannel) channel).setRadialShape(shape);
                     }
                 }
             }
@@ -69,10 +105,57 @@ public class Core extends Component {
                     if (channel instanceof FuelChannel) {
                         FuelChannel fc = (FuelChannel) channel;
                         fc.setRadialShape(fc.getRadialShape() / mean);
+                    } else if (channel instanceof CPSChannel) {
+                        CPSChannel cc = (CPSChannel) channel;
+                        cc.setRadialShape(cc.getRadialShape() / mean);
                     }
                 }
             }
             kinetics.fuelChannelCount = Math.max(1, fuelChannelCount);
+        }
+
+        /**
+         * 把当前 211 根棒的棒位汇总进内核（不推进物理）。
+         *
+         * <p>与 {@link #update()} 里那段求和同口径：Java 侧 position 1=全插、0=全提，
+         * 内核要的是 0=全插、1=全提（pushInputs 里取 1-x）。标准初始工况要在
+         * **复位内核之前**先把棒位对齐，否则复位后第一帧会把"全插"推给内核，
+         * 下一帧再推 0.25 等于"瞬间提棒"注入一大笔正反应性。</p>
+         */
+        void syncRodInsertion() {
+            double rodSum = 0;
+            int rodCount = 0;
+            for (ArrayList<Channel> row : coreArray) {
+                for (Channel channel : row) {
+                    if (channel instanceof ControlRodChannel) {
+                        rodSum += ((ControlRodChannel) channel).getPosition();
+                        rodCount++;
+                    }
+                }
+            }
+            if (rodCount > 0 && kinetics != null) {
+                kinetics.rodInsertion = rodSum / rodCount;
+            }
+        }
+
+        /**
+         * 复位到额定平衡态（2026-11-02，标准初始工况用）。
+         * 调用前请先把各棒位置设好——本方法会把它们汇总进内核再复位。
+         */
+        boolean resetToNominal() {
+            if (kinetics == null) {
+                kinetics = new ReactorKinetics();
+            }
+            syncRodInsertion();
+            boolean ok = kinetics.resetToNominal();
+            icRatedFlowTicks = RATED_FLOW_GRACE_TICKS;
+            // 立刻同步显示量，界面不必等下一帧
+            thermalPower = kinetics.totalPowerMW;
+            neutronCount = kinetics.neutronTotal;
+            reactivity = kinetics.reactivityAbs;
+            period = kinetics.periodSeconds;
+            fcNeutronCount = kinetics.neutronTotal;
+            return ok;
         }
 
         public void update() {
@@ -97,6 +180,7 @@ public class Core extends Component {
             int rodCount = 0;
             double flowSum = 0, inflowTempFlowSum = 0;
             int inflowCount = 0;
+            int fuelSeen = 0, dryCount = 0;
             double pressSum = 0;
             int pressCount = 0;
             for (ArrayList<Channel> row : coreArray) {
@@ -108,6 +192,8 @@ public class Core extends Component {
                         FuelChannel fc = (FuelChannel) channel;
                         pressSum += fc.getPressure();
                         pressCount++;
+                        fuelSeen++;
+                        if (fc.isDryout()) dryCount++;
                         double r = fc.getWaterInflowRate();
                         if (r > 0) {
                             flowSum += r;
@@ -117,12 +203,27 @@ public class Core extends Component {
                     }
                 }
             }
+            /* 干涸通道占比 → 内核平均换热系数。取上一 tick 的通道状态（此刻通道还没更新），
+             * 50 ms 的滞后对传热恶化这种秒级过程没有影响。 */
+            /* 保护期内不要报干涸（2026-11-02）：装载标准工况后的头 45 s 里一回路流量还在建立，
+             * 通道侧会瞬时"干涸"。把这个假信号推给内核会让它按传热恶化处理，
+             * 功率从 4800 MW 掉到几百 MW 且每次都不一样。 */
+            kinetics.dryoutFraction = icRatedFlowTicks > 0
+                    ? 0.0
+                    : (fuelSeen > 0 ? (double) dryCount / fuelSeen : 0.0);
             kinetics.rodInsertion = rodCount > 0 ? rodSum / rodCount : kinetics.rodInsertion;
             kinetics.pressureMPa = pressCount > 0 ? pressSum / pressCount : kinetics.pressureMPa;
             // 仅主回路流量（MCP）；离线冷却经换热器/河水单独通道进引擎，不并入（P0：避免重复计入）。
             // 读档后的第一个 tick 通道流量可能尚未重新建立（为 0），此时保留存档恢复的输入，
             // 不能把刚恢复的堆芯按 0 流量再推一步。
-            if (flowSum > 1.0) {
+            if (icRatedFlowTicks > 0) {
+                /* 保护期：实测流量还没建立，先按额定喂内核；实测值更大时以实测为准。 */
+                icRatedFlowTicks--;
+                if (icRatedFlowTicks == 0) {
+                    icAzRestorePending = true;
+                }
+                kinetics.mdotTotal = Math.max(flowSum, RATED_FLOW_KGS * 0.95);
+            } else if (flowSum > 1.0) {
                 kinetics.mdotTotal = flowSum;
                 if (inflowCount > 0) {
                     double tIn = inflowTempFlowSum / flowSum;
@@ -138,8 +239,31 @@ public class Core extends Component {
             kinetics.update(0.05);   // 仿真帧长 50 ms
 
             // ---- 3) 结果分配：功率/碘/氙 → 每根燃料通道（按径向形状）----
-            double perChannelBase = kinetics.totalPowerMW / Math.max(1, fuelChannelCount);
+            /* 自检注入 coreHeatOverrideMW ≥ 0 时，用它替代堆芯功率。
+             * 2026-11-01 前这个注入是直接写进汽包热源的（与通道加热重复计入）；
+             * 现在热量只能走"堆芯 → 通道 → 汽包"这一条路，所以注入点也必须挪到通道侧。 */
+            double powerMW = kinetics.totalPowerMW;
+            if (NPPSim.coreHeatOverrideMW >= 0.0) {
+                powerMW = NPPSim.coreHeatOverrideMW;
+            }
+            if (!Double.isFinite(powerMW) || powerMW < 0.0) {
+                powerMW = 0.0;
+            }
+            /* 标准工况装载期间的自动 AZ 旁路：等功率真回到 AZ-3 定值（5200 MW）以下再投回去。
+             * 否则会在整定后的功率冲高段被 AZ-3 直接 SCRAM（实测掉到 500 MW）。 */
+            if (icAzRestorePending && NPPSim.autoControl != null && powerMW > 0.0
+                    && powerMW < AZ_RESTORE_POWER_MW) {
+                if (++azRestoreTicks >= 40) {
+                    NPPSim.autoControl.azAutoEnabled = true;
+                    icAzRestorePending = false;
+                    azRestoreTicks = 0;
+                }
+            } else {
+                azRestoreTicks = 0;
+            }
+            double perChannelBase = powerMW / Math.max(1, fuelChannelCount);
             double chNominalMW = 4800.0 / Math.max(1, fuelChannelCount);   // 额定通道功率（相对通量归一基准）
+            final double coreRelativePower = powerMW / 4800.0;             // 堆芯相对功率（1.0 = 额定）
             double tempSum = 0;
             int tempCount = 0;
             for (ArrayList<Channel> row : coreArray) {
@@ -156,10 +280,18 @@ public class Core extends Component {
                         fc.setNeutronPopulation(flux, flux);
                         tempSum += fc.getWaterTemperature() * flux;
                         tempCount += flux;   // 相对通量加权（等效流量加权，热通道不被稀释）
+                    } else if (channel instanceof CPSChannel) {
+                        /* 控制棒通道不产热，但堆芯图上要显示它所在位置的通量。
+                         * 原始 jar 靠 56×56 元胞自动机的邻域中子扩散给出；点堆内核没有空间中子学，
+                         * 这里用同一套径向形状 × 堆芯相对功率补上 —— 否则 CPS 恒为初值 1.0，
+                         * 223 个绿点整层恒暗（mean=1.0，永远达不到 1+阈值）。 */
+                        CPSChannel cc = (CPSChannel) channel;
+                        double flux = coreRelativePower * cc.getRadialShape();
+                        cc.setNeutronPopulation(flux, flux);
                     }
                 }
             }
-            thermalPower = kinetics.totalPowerMW;
+            thermalPower = powerMW;
             reactivity = kinetics.reactivityAbs;
             previousNeutronCount = neutronCount;   // 上一 tick 值（旧实现同 tick 双赋，差分恒 0）
             neutronCount = kinetics.neutronTotal;

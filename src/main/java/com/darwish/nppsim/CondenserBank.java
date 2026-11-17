@@ -17,7 +17,7 @@ import java.io.Serializable;
  *
  * 单台的模型仍然是 {@link Condenser}：集总热平衡 + 由冷却水量和热负荷反算真空。
  */
-class CondenserBank implements Connectable, SteamSupplyLimit, Serializable {
+class CondenserBank implements Connectable, SteamSupplyLimit, WaterSupplyLimit, Serializable {
     private static final long serialVersionUID = 1L;
 
     /** 每个汽轮机的凝汽器台数 */
@@ -44,6 +44,16 @@ class CondenserBank implements Connectable, SteamSupplyLimit, Serializable {
         for (Condenser c : units) {
             c.update();
         }
+    }
+
+    /** 4 台热井合计还能被凝泵抽走多少 kg（保底水位 −30 %，见 Condenser） */
+    @Override
+    public double availableWaterKg() {
+        double s = 0;
+        for (Condenser c : units) {
+            s += c.availableWaterKg();
+        }
+        return s;
     }
 
     /** 把热井排水阀接到同一个去向（4 台各一只） */

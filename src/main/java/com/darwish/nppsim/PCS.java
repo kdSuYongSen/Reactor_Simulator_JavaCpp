@@ -76,7 +76,12 @@ public class PCS extends Component {
             dearatorMakeupValves.add(new WaterValve(209.77, 12, admsHeader, dearators.get(i)));
         }
         for (int i = 0; i < 4; i++) {
-            dearatorOverflowValves.add(new WaterValve(41.4, 10, dearators.get(i), demineralizedWaterTank));
+            /* 除氧器排水（溢流）阀：除氧器 → 除盐水箱。
+             * 2026-11-02：Cv 41.4 → 110。旧阀在 0.53 MPa / 153 °C 下只有约 5.7 kg/s
+             * 的通流能力，而单台除氧器给水流量约 450 kg/s，水位一旦冲高根本排不下来，
+             * 只能靠水位报警干看着。实测 Cv 110 全开约 52 kg/s（≈100 mm 排水管径的
+             * 通流能力），既能把高水位压回去，又不会在 10~15% 的开关带里把除氧器抽空。 */
+            dearatorOverflowValves.add(new WaterValve(110.0, 10, dearators.get(i), demineralizedWaterTank));
         }
         // DW 补水环路（2026-10-28）：河 → 通用净化装置 → DW 泵 → 除盐水箱
         dwMakeupPump = new SimplePump(700, 0.2f, 0.83, 0.024516625, 10, 10, 10, purification, demineralizedWaterTank);   // 最大 ≈200 kg/s

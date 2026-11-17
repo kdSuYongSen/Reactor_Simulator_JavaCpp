@@ -65,6 +65,12 @@ public final class LayoutWriter {
             b.put("w", Math.max(1, block.w));
             b.put("h", Math.max(1, block.h));
             b.put("visible", block.visible);
+            if (block.bg != null) {
+                b.put("bg", block.bg);
+            }
+            if (block.fg != null) {
+                b.put("fg", block.fg);
+            }
 
             JSONObject kids = new JSONObject();
             JSONObject nodes = new JSONObject();
@@ -84,7 +90,7 @@ public final class LayoutWriter {
     /** 收集 dirty 的节点：一层写 children，更深写 nodes（路径 "0/2"） */
     private static void collect(Manifest.Node node, JSONObject kids, JSONObject nodes) {
         for (Manifest.Node c : node.children) {
-            if (c.dirty) {
+            if (c.dirty || c.colorDirty) {
                 JSONObject o = new JSONObject();
                 o.put("cls", c.cls);
                 o.put("x", c.x);
@@ -92,6 +98,12 @@ public final class LayoutWriter {
                 o.put("w", Math.max(1, c.w));
                 o.put("h", Math.max(1, c.h));
                 o.put("visible", c.visible);
+                if (c.bg != null) {
+                    o.put("bg", c.bg);
+                }
+                if (c.fg != null) {
+                    o.put("fg", c.fg);
+                }
                 if (c.path.indexOf('/') < 0) {
                     kids.put(c.path, o);
                 } else {
@@ -113,7 +125,7 @@ public final class LayoutWriter {
     }
 
     private static boolean anyDirty(Manifest.Node n) {
-        if (n.dirty) {
+        if (n.dirty || n.colorDirty) {
             return true;
         }
         for (Manifest.Node c : n.children) {

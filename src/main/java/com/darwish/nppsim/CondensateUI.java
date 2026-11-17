@@ -35,6 +35,14 @@ public class CondensateUI extends javax.swing.JFrame implements UIUpdateable, Se
         ((JSpinner.DefaultEditor)spinner1B.getEditor()).getTextField().setEditable(false);
         ((JSpinner.DefaultEditor)spinner2B.getEditor()).getTextField().setEditable(false);
         ((JSpinner.DefaultEditor)ejector1Spinner.getEditor()).getTextField().setEditable(false);
+        // 四台凝结水泵的"开始/停止"单选钮换成槽式拨杆（2026-11-15）
+        String cp = Localization.t("Condensate pump");
+        PumpSwitchPanel.installPickerTall(start1A.getParent(), spinner1A, condensate1A, cp + " A1", 26);
+        PumpSwitchPanel.installPickerTall(start1B.getParent(), spinner1B, condensate1B, cp + " B1", 26);
+        PumpSwitchPanel.installPickerTall(start2A.getParent(), spinner2A, condensate2A, cp + " A2", 26);
+        PumpSwitchPanel.installPickerTall(start2B.getParent(), spinner2B, condensate2B, cp + " B2", 26);
+        /* 凝汽器循环水泵的两块面板只有约 110 px 宽，塞进拨杆会被裁成一条线，
+         * 暂保留原单选钮；要改需先重排"凝汽器循环水泵"整块版面。 */
         ((JSpinner.DefaultEditor)ejector2Spinner.getEditor()).getTextField().setEditable(false);
         // 每台汽轮机 4 台凝汽器：副标题右侧的 1–4 选择器
         installCondenserSelectors();
@@ -289,8 +297,6 @@ public class CondensateUI extends javax.swing.JFrame implements UIUpdateable, Se
     private VacuumEjectorPanel vacuumPanel1, vacuumPanel2;
     /** 真空抽气控制区（流量控制面板正下方）；initComponents 先挂空面板，构造时再填充内容 */
     private final javax.swing.JPanel vacuumRow = new javax.swing.JPanel(new java.awt.BorderLayout());
-    /** 凝结水系统排水阀面板（联箱 → 除盐水箱，开阀亮红色"排水阀开启"） */
-    private DrainValvePanel condensateDrainPanel;
 
     /** 真空抽气泵控制区（合体图样式）：标题 + 两台泵并排，追加在页面底部 */
     private void installVacuumEjectorPanels() {
@@ -311,14 +317,9 @@ public class CondensateUI extends javax.swing.JFrame implements UIUpdateable, Se
         pair.add(vacuumPanel2);
         vacuumRow.add(pair, java.awt.BorderLayout.CENTER);
 
-        // 凝结水系统排水阀（自动排水 → 除盐水箱；开阀报警在左上角 annunciator 的 drainOpen 灯）
-        if (NPPSim.condensateDrainValve != null) {
-            condensateDrainPanel = new DrainValvePanel(
-                    Localization.t("Condensate System Drain"),
-                    NPPSim.condensateDrainValve,
-                    null);
-            vacuumRow.add(condensateDrainPanel, java.awt.BorderLayout.SOUTH);
-        }
+        /* 凝结水系统排水阀（2026-11-02）：改为**纯自动**，不再提供操作面板。
+         * 联箱压力 > 1.20 MPa 自动开、< 1.00 MPa 自动关（见 NPPSim.update()），
+         * 操作员只需在左上角 annunciator 上看到"凝结水排水"红色报警即可。 */
     }
 
     @Override
@@ -365,9 +366,6 @@ public class CondensateUI extends javax.swing.JFrame implements UIUpdateable, Se
 
                 showUnit(ejectorFlow1, Units.Quantity.FLOW, selected1Ejector.getFlowRate());
                 showUnit(SGAMFlow1, Units.Quantity.FLOW, selected1Ejector.getEjectorFlowRate());
-                if (condensateDrainPanel != null) {
-                    condensateDrainPanel.refresh();
-                }
                 showUnit(ejectorFlow2, Units.Quantity.FLOW, selected2Ejector.getFlowRate());
                 showUnit(SGAMFlow2, Units.Quantity.FLOW, selected2Ejector.getEjectorFlowRate());
             });
@@ -520,9 +518,11 @@ public class CondensateUI extends javax.swing.JFrame implements UIUpdateable, Se
         } else {
             annunciator.reset(relief2);
         }
-        // 凝结水系统排水阀开启 → 红色报警（自动排水时提醒）
+        // 凝结水系统排水阀：已改为纯自动（无操作面板），只有联箱压力越过阈值、
+        // 阀门真的在排水时才亮红色报警——避免"阀开着但没流量"也一直响。
         annunciator.setTrigger(NPPSim.condensateDrainValve != null
-                && NPPSim.condensateDrainValve.getPosition() > 0.01f, drainOpen);
+                && NPPSim.condensateDrainValve.getPosition() > 0.01f
+                && NPPSim.condensateDrainValve.timestepFlow > 0.0, drainOpen);
         boolean cavitation1A = false;
         for (Pump pump: condensate1A) {
             if (pump.isCavitating) {

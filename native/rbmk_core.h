@@ -45,6 +45,11 @@ public:
     void   setOfflineFlow(double kgs); /* 离线冷却河水流量 kg/s（20C 置换热沉） */
     void   setSaturationTemp(double c);/* 由 Java 蒸汽表按当前压力给出 */
     void   setInletEnthalpy(double jPerKg); /* 入口焓，相对 h(270C)=0 */
+    /* 干涸通道占比 0..1（Java 侧按每通道水装量统计后注入）。
+     * 传热系数 H_CM 按 (1 - 0.95f) 线性衰减 —— 并联通道的平均换热能力。
+     * f=0 时与额定完全相同（不影响既有标定）。 */
+    void   setDryoutFraction(double f);
+    double dryoutFraction() const { return dryoutFrac_; }
     void   freeze();                   /* 冻结: 全部导数置零 (取系数用) */
 
     /* ---- AR 自动调节器 (代表自动调节棒组) ---- */
@@ -112,6 +117,7 @@ private:
     bool   scramLatch_, useScramSpeed_, frozen_;
     double flow_;
     double offlineFlow_ = 0.0;             /* 离线冷却河水流量 kg/s */
+    double dryoutFrac_ = 0.0;              /* 干涸通道占比 0..1（Java 注入） */
     double tSat_ = T_SAT;                  /* 当前压力对应的饱和温度 C（Java 注入） */
     double hIn_ = 0.0;                     /* 入口焓 J/kg，相对 h(270C)=0（Java 注入） */
     double rhoTrim_[N];              /* 逐节点配平反应性 (使额定 rho_j=0) */

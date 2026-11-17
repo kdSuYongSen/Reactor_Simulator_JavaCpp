@@ -24,6 +24,8 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
         this.setTitle(Localization.t("Turbine-Generators"));
         WindowMenu.install(this);        // 统一窗口导航（含新增页面）
         PageLayout.installAuto(this, "TGUI");   // 本页布局可由布局编辑器调整
+        /* 本窗口的报警盘（按原 jar：GridLayout(3,6) 共 18 只灯），
+         * 汽轮机新增的机械脱扣报警也放在这里，不搬到主控室。 */
         annunciator = new Annunciator(annunciatorPanel);
         
         ((JSpinner.DefaultEditor)sdvcSpinner1.getEditor()).getTextField().setEditable(false);
@@ -117,11 +119,191 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
         sdvcManual.setSelected(!autoControl.sdv_cControl.get(0).isEnabled());
         autoSteamPressure1On.setSelected(autoControl.tgValveControl.get(0).isEnabled());
         autoSteamPressure1On1.setSelected(autoControl.tgValveControl.get(2).isEnabled());
+        initTurbineProtectionPanel();
+    }
+
+    /**
+     * 汽轮机启动/跳闸控制面板（2026-11-03）。
+     *
+     * <p>样式照抄主界面的"自动 AZ"：深色底 + TitledBorder + ON/OFF 互斥开关。
+     * 放在"汽轮发电机 2"分区右侧的空白处，并作为本窗口内容面板的直接子组件 ——
+     * 这样 {@link PageLayout} 自动发现它，布局编辑器（窗口调整器）里就能单独拖动/缩放。</p>
+     *
+     * <p>每台机一组：自动跳闸 ON/OFF、当前状态、复位按钮、机械脱扣红灯。
+     * ON/OFF 只旁路<b>电气</b>保护；转速到 111.5% 的机械卡扣脱扣不受它控制。</p>
+     */
+    private void initTurbineProtectionPanel() {
+        tgProtectionPanel = new javax.swing.JPanel();
+        tgProtectionPanel.setName("tg_protection");
+        tgProtectionPanel.setBackground(new java.awt.Color(52, 52, 52));
+        tgProtectionPanel.setOpaque(true);
+        /* 边框只用线框、标题单独做成 JLabel：
+         * TitledBorder 的标题是画在边框线上的（上半截在组件外），放进绝对定位的容器里
+         * 会被父容器裁掉半行字（实测"汽轮机保护"顶部少一截）。 */
+        tgProtectionPanel.setBorder(javax.swing.BorderFactory.createLineBorder(
+                new java.awt.Color(222, 222, 222), 1, true));
+        tgProtectionPanel.setLayout(new java.awt.BorderLayout(0, 2));
+
+        javax.swing.JLabel protTitle = new javax.swing.JLabel(Localization.t("Turbine Protection"));
+        protTitle.setFont(new java.awt.Font("Dialog", 1, 12));
+        protTitle.setForeground(new java.awt.Color(235, 235, 235));
+        protTitle.setBorder(javax.swing.BorderFactory.createEmptyBorder(4, 8, 2, 4));
+        tgProtectionPanel.add(protTitle, java.awt.BorderLayout.NORTH);
+
+        javax.swing.JPanel protBody = new javax.swing.JPanel(new java.awt.GridLayout(2, 1, 0, 2));
+        protBody.setOpaque(false);
+        protBody.add(buildTurbineGroup(0, tg1));
+        protBody.add(buildTurbineGroup(1, tg2));
+        tgProtectionPanel.add(protBody, java.awt.BorderLayout.CENTER);
+
+        java.awt.Container host = jPanel2.getParent();      // 与"汽轮发电机 1/2"分区同一个父容器
+        if (host != null) {
+            host.add(tgProtectionPanel);
+            // 2 号机组分区 x=568 宽 565（右边界 1133），面板窗宽 1372 —— 右边还剩 230 多像素
+            tgProtectionPanel.setBounds(1141, 366, 219, 338);
+            /* 立刻按当前尺寸摆一次内部两行：GridLayout 只在容器 validate 时才会给子面板分配
+             * 尺寸，而这个面板是运行时加进 GroupLayout 容器的、不在任何一个组里，
+             * 不主动 doLayout 的话两块子面板会停在 0x0（实测就是这样）。 */
+            tgProtectionPanel.doLayout();
+        }
+    }
+
+    /** 单台机的保护控制块（一台机一行） */
+    private javax.swing.JPanel buildTurbineGroup(final int idx, final TG unit) {
+        javax.swing.JPanel p = new javax.swing.JPanel(null);
+        p.setOpaque(false);
+
+        javax.swing.JLabel title = new javax.swing.JLabel(Localization.t("Turbine-Generator") + " " + (idx + 1));
+        title.setFont(new java.awt.Font("Dialog", 1, 12));
+        title.setForeground(new java.awt.Color(235, 235, 235));
+        title.setBounds(8, 4, 200, 18);
+        p.add(title);
+
+        tgAutoTripOn[idx] = new javax.swing.JRadioButton();
+        tgAutoTripOff[idx] = new javax.swing.JRadioButton();
+        javax.swing.ButtonGroup g = new javax.swing.ButtonGroup();
+        g.add(tgAutoTripOn[idx]);
+        g.add(tgAutoTripOff[idx]);
+        org.openide.awt.Mnemonics.setLocalizedText(tgAutoTripOn[idx], Localization.t("Auto Trip"));
+        org.openide.awt.Mnemonics.setLocalizedText(tgAutoTripOff[idx], Localization.t("OFF"));
+        tgAutoTripOn[idx].setOpaque(false);
+        tgAutoTripOff[idx].setOpaque(false);
+        tgAutoTripOn[idx].setFont(new java.awt.Font("Dialog", 1, 10));
+        tgAutoTripOff[idx].setFont(new java.awt.Font("Dialog", 1, 10));
+        tgAutoTripOn[idx].setForeground(new java.awt.Color(235, 235, 235));
+        tgAutoTripOff[idx].setForeground(new java.awt.Color(235, 235, 235));
+        tgAutoTripOn[idx].setBounds(6, 24, 110, 22);
+        tgAutoTripOff[idx].setBounds(120, 24, 60, 22);
+        tgAutoTripOn[idx].setSelected(unit.getProtection().autoTripEnabled);
+        tgAutoTripOff[idx].setSelected(!unit.getProtection().autoTripEnabled);
+        tgAutoTripOn[idx].addActionListener(e -> {
+            unit.getProtection().autoTripEnabled = true;
+            autoControl.recordEvent(Localization.t("Turbine Auto Trip") + " ON");
+        });
+        tgAutoTripOff[idx].addActionListener(e -> {
+            unit.getProtection().autoTripEnabled = false;
+            autoControl.recordEvent(Localization.t("Turbine Auto Trip") + " OFF");
+        });
+        p.add(tgAutoTripOn[idx]);
+        p.add(tgAutoTripOff[idx]);
+
+        tgTripStatus[idx] = new javax.swing.JLabel("—");
+        tgTripStatus[idx].setFont(new java.awt.Font("Dialog", 0, 11));
+        tgTripStatus[idx].setForeground(new java.awt.Color(235, 235, 235));
+        tgTripStatus[idx].setBounds(8, 48, 205, 32);
+        p.add(tgTripStatus[idx]);
+
+        tgProtReset[idx] = new javax.swing.JButton(Localization.t("RESET"));
+        tgProtReset[idx].setFont(new java.awt.Font("Dialog", 0, 10));
+        tgProtReset[idx].setMargin(new java.awt.Insets(0, 0, 0, 0));
+        tgProtReset[idx].setFocusable(false);
+        tgProtReset[idx].setBounds(8, 84, 90, 24);
+        tgProtReset[idx].addActionListener(e -> {
+            TurbineProtection pr = unit.getProtection();
+            if (pr.mechanicalTripped && !pr.canResetMechanical(unit.getRpm())) {
+                // 还在超速：机械飞锤会立刻再打一次，先降转速
+                autoControl.recordEvent(Localization.t("Cannot reset: still overspeed"));
+                return;
+            }
+            unit.reset();          // 真空/汽包条件不满足时 reset() 不会解除跳闸
+            if (unit.isTripped()) {
+                autoControl.recordEvent(Localization.t("Reset refused: check vacuum / drum pressure"));
+            }
+        });
+        p.add(tgProtReset[idx]);
+
+        tgMechLamp[idx] = new javax.swing.JTextField(Localization.t("Mechanical Trip"));
+        tgMechLamp[idx].setHorizontalAlignment(javax.swing.JTextField.CENTER);
+        tgMechLamp[idx].setEditable(false);
+        tgMechLamp[idx].setFont(new java.awt.Font("Dialog", 1, 10));
+        tgMechLamp[idx].setForeground(java.awt.Color.WHITE);
+        tgMechLamp[idx].setBackground(Annunciator.REDOFF_COLOR);
+        tgMechLamp[idx].setBounds(8, 116, 205, 24);
+        p.add(tgMechLamp[idx]);
+
+        /* ---- 润滑油压（2026-11-16）：本窗口里也看得见，点一下开润滑油系统窗口 ---- */
+        tgLubeRow[idx] = new javax.swing.JLabel("—");
+        tgLubeRow[idx].setFont(new java.awt.Font("Dialog", 0, 10));
+        tgLubeRow[idx].setForeground(new java.awt.Color(150, 200, 240));
+        tgLubeRow[idx].setBounds(8, 142, 205, 16);
+        tgLubeRow[idx].setCursor(java.awt.Cursor.getPredefinedCursor(
+                java.awt.Cursor.HAND_CURSOR));
+        tgLubeRow[idx].setToolTipText(Localization.t("Turbine Lube Oil"));
+        tgLubeRow[idx].addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mousePressed(java.awt.event.MouseEvent e) {
+                UI.createOrContinue(TurbineLubeUI.class, true, false);
+            }
+        });
+        p.add(tgLubeRow[idx]);
+
+        return p;
+    }
+
+    /** 保护面板刷新（仿真线程里调用，切到 EDT 执行） */
+    private void updateTurbineProtectionPanel() {
+        if (tgProtectionPanel == null) {
+            return;
+        }
+        for (int i = 0; i < 2; i++) {
+            final TG unit = (i == 0) ? tg1 : tg2;
+            final TurbineProtection pr = unit.getProtection();
+            final javax.swing.JLabel st = tgTripStatus[i];
+            final javax.swing.JTextField lamp = tgMechLamp[i];
+            final javax.swing.JLabel lube = tgLubeRow[i];
+            final int idx = i;
+            java.awt.EventQueue.invokeLater(() -> {
+                boolean mech = pr.mechanicalTripped;
+                lamp.setBackground(mech ? Annunciator.REDON_COLOR : Annunciator.REDOFF_COLOR);
+                if (unit.isTripped()) {
+                    st.setForeground(new java.awt.Color(255, 120, 120));
+                    String why = pr.tripReason == null || pr.tripReason.isEmpty()
+                            ? Localization.t("TRIP") : pr.tripReason;
+                    st.setText("<html>" + Localization.t("Tripped") + ": " + why + "</html>");
+                } else {
+                    st.setForeground(new java.awt.Color(150, 230, 150));
+                    st.setText(Localization.t("Running"));
+                }
+                if (tgAutoTripOn[idx].isSelected() != pr.autoTripEnabled) {
+                    tgAutoTripOn[idx].setSelected(pr.autoTripEnabled);
+                    tgAutoTripOff[idx].setSelected(!pr.autoTripEnabled);
+                }
+                // 润滑油压（低油压时变红；点这一行打开润滑油系统窗口）
+                if (lube != null) {
+                    boolean low = unit.getLubePress() < TurbineProtection.LOW_LUBE_BAR;
+                    lube.setText(Localization.t("lube.press") + "  "
+                            + String.format("%.2f bar", unit.getLubePress()) + "  \u203A");
+                    lube.setForeground(low ? new java.awt.Color(255, 110, 110)
+                            : new java.awt.Color(150, 200, 240));
+                }
+            });
+        }
     }
     
     @Override
     public void update() {
         checkAlarms();
+        updateTurbineProtectionPanel();
         if (this.isVisible()) {
             java.awt.EventQueue.invokeLater(() -> {
                 double totalFlow1 = 0.0;
@@ -259,7 +441,11 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
         } else {
             annunciator.reset(steamTemp);
         }
-        annunciator.setTrigger(steamPiping.getPressure() < 6.0, steamPress);
+        /* 主蒸汽母管是 4.0 MPa（二回路设计压力），原来这里写 6.0 会**永久**亮"主汽压力低"。 */
+        annunciator.setTrigger(steamPiping.getPressure() < TurbineProtection.LOW_STEAM_MPA, steamPress);
+        /* 机械脱扣（111.5%）：三只灯同时亮 —— 机械脱扣、超速、跳闸 */
+        annunciator.setTrigger(tg1.getProtection().mechanicalTripped, jTextField3);
+        annunciator.setTrigger(tg2.getProtection().mechanicalTripped, jTextField8);
         annunciator.setTrigger(tg1.condenser.getPressure() > 0.015, lowVacuum1);
         annunciator.setTrigger(tg2.condenser.getPressure() > 0.015, lowVacuum2);
         annunciator.setTrigger(tg1.condenser.getPressure() > 0.025, noVacuum1);
@@ -1341,7 +1527,7 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
         jTextField3.setFont(new java.awt.Font("Dialog", 1, 10)); // NOI18N
         jTextField3.setForeground(new java.awt.Color(0, 0, 0));
         jTextField3.setHorizontalAlignment(javax.swing.JTextField.CENTER);
-        jTextField3.setText(Localization.t("TG-1 Vibration"));
+        jTextField3.setText(Localization.t("TG-1 Mech. Trip"));
         jTextField3.setBorder(javax.swing.BorderFactory.createBevelBorder(javax.swing.border.BevelBorder.RAISED));
         jTextField3.setFocusable(false);
         annunciatorPanel.add(jTextField3);
@@ -1351,7 +1537,7 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
         jTextField8.setFont(new java.awt.Font("Dialog", 1, 10)); // NOI18N
         jTextField8.setForeground(new java.awt.Color(0, 0, 0));
         jTextField8.setHorizontalAlignment(javax.swing.JTextField.CENTER);
-        jTextField8.setText(Localization.t("TG-2 Vibration"));
+        jTextField8.setText(Localization.t("TG-2 Mech. Trip"));
         jTextField8.setBorder(javax.swing.BorderFactory.createBevelBorder(javax.swing.border.BevelBorder.RAISED));
         jTextField8.setFocusable(false);
         annunciatorPanel.add(jTextField8);
@@ -1416,7 +1602,7 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
         jTextField18.setFont(new java.awt.Font("Dialog", 1, 10)); // NOI18N
         jTextField18.setForeground(new java.awt.Color(0, 0, 0));
         jTextField18.setHorizontalAlignment(javax.swing.JTextField.CENTER);
-        jTextField18.setText(Localization.t("TG-1 Diff. Exp"));
+        jTextField18.setText(Localization.t("TG-2 Diff. Exp"));
         jTextField18.setBorder(javax.swing.BorderFactory.createBevelBorder(javax.swing.border.BevelBorder.RAISED));
         jTextField18.setFocusable(false);
         annunciatorPanel.add(jTextField18);
@@ -1499,7 +1685,7 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
         jTextField14.setFont(new java.awt.Font("Dialog", 1, 10)); // NOI18N
         jTextField14.setForeground(new java.awt.Color(0, 0, 0));
         jTextField14.setHorizontalAlignment(javax.swing.JTextField.CENTER);
-        jTextField14.setText(Localization.t("TG-1 oil press."));
+        jTextField14.setText(Localization.t("TG-2 oil press."));
         jTextField14.setBorder(javax.swing.BorderFactory.createBevelBorder(javax.swing.border.BevelBorder.RAISED));
         jTextField14.setFocusable(false);
         jTextField14.setPreferredSize(new java.awt.Dimension(100, 30));
@@ -2730,6 +2916,15 @@ public class TGUI extends javax.swing.JFrame implements UIUpdateable {
 
     // Variables declaration - do not modify//GEN-BEGIN:variables
     private javax.swing.JPanel annunciatorPanel;
+    /* ---- 汽轮机保护面板（2026-11-03，模仿"自动 AZ"的样式）---- */
+    private javax.swing.JPanel tgProtectionPanel;
+    private final javax.swing.JRadioButton[] tgAutoTripOn = new javax.swing.JRadioButton[2];
+    private final javax.swing.JRadioButton[] tgAutoTripOff = new javax.swing.JRadioButton[2];
+    private final javax.swing.JLabel[] tgTripStatus = new javax.swing.JLabel[2];
+    private final javax.swing.JTextField[] tgMechLamp = new javax.swing.JTextField[2];
+    private final javax.swing.JButton[] tgProtReset = new javax.swing.JButton[2];
+    /** 汽轮机润滑油压读数（点一下打开润滑油系统窗口） */
+    private final javax.swing.JLabel[] tgLubeRow = new javax.swing.JLabel[2];
     private javax.swing.JRadioButton autoSteamPressure1Off;
     private javax.swing.JRadioButton autoSteamPressure1Off1;
     private javax.swing.JRadioButton autoSteamPressure1On;

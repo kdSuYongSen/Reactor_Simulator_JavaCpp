@@ -34,6 +34,8 @@ final class ReactorKinetics {
     int fuelChannelCount = 1661;
     double mdotOffline = 400.0;    // 离线部分（诊断口径，已含在 mdotTotal）
     double hOfflineIn = 87.0;
+    /** 干涸通道占比 0..1：由 Core 按每通道水装量统计后写入，注入内核降低平均换热能力 */
+    double dryoutFraction = 0.0;
 
     // ---- 输出 ----
     double totalPowerMW;           // 含衰减热
@@ -98,6 +100,44 @@ final class ReactorKinetics {
         }
         cc.setSaturationTemp(tsat);
         cc.setInletEnthalpy(hInHeader * 1000.0);   // kJ/kg → J/kg
+        // 干涸通道占比 → 堆芯平均换热系数（f=0 时与额定完全一致）
+        cc.setDryoutFraction(dryoutFraction);
+    }
+
+    /**
+     * 复位到**额定平衡态**（2026-11-02，标准初始工况用）。
+     *
+     * <p>内核的 {@code resetToNominal()} 会给出一个真正自洽的额定态：
+     * 各节点中子数 n=1、逐节点配平反应性 ρ_j=0（含棒位/Doppler/石墨温度/空泡/氙的静态偏置）、
+     * 氙碘在额定平衡浓度、冷却剂流量 MDOT_NOM、饱和温度 T_SAT(284 °C)、棒位 P_ROD_NOMINAL(0.75)。</p>
+     *
+     * <p>注意：调用前必须先把 Java 侧 211 根棒的汇总棒位写进 {@link #rodInsertion}，
+     * 否则 {@link #pushInputs()} 会把默认的 1.0（全插）推给内核，
+     * 下一帧再推 0.25 就等于"瞬间提棒"注入一大笔正反应性。</p>
+     */
+    boolean resetToNominal() {
+        /* 先把输入侧置为额定：mdotTotal 平时只有离线冷却的 400 kg/s，
+         * 直接复位会让内核按 3% 流量起算，堆芯立刻烧空/空泡化，
+         * 功率从 4800 MW 掉到几百 MW（2026-11-02 标准工况自检踩到）。
+         * 入口焓取 270 °C 基准（hInHeader=0 就是内核的焓参考点）。 */
+        mdotTotal = MDOT_NOM;
+        mdotOffline = 0.0;
+        hInHeader = 0.0;
+        pressureMPa = 6.9;
+        if (cc == null) {
+            if (attachFailed) {
+                return false;
+            }
+            attach();
+            if (cc == null) {
+                return false;
+            }
+        }
+        cc.reset();          // nativeReset → resetToNominal()
+        cc.refresh();
+        pushInputs();
+        recomputeOutputs();
+        return true;
     }
 
     // ------------------------------------------------------------------

@@ -43,6 +43,8 @@ public class NPPSim {
     static WaterMixer feedwaterMixer1, feedwaterMixer2;
     static AutoControl autoControl;
     static PCS pcs;
+    /** 全厂电气系统（220 kV 主电网 / 110 kV 辅助 / 6.6 kV 厂用与应急 / 380 V / 220 V 直流） */
+    static ElectricalGrid grid;
     /** 凝结水系统排水阀（凝结水联箱 → 除盐水箱）：手动放水，开阀时界面亮红色"排水阀开启" */
     static WaterValve condensateDrainValve;
     /** 给水系统排水阀（主给水母管 → 除盐水箱）：手动放水，开阀时界面亮红色"排水阀开启" */
@@ -81,12 +83,22 @@ public class NPPSim {
      * 旧值 3044.72（≈53 kg/s/只）是全厂蒸汽直连汽轮机时代的旁路口径，
      * 全厂蒸汽改走除氧器后只够 250 kg/s，汽轮机永远带不上负荷。
      */
-    /** 主汽门 Cv：主蒸汽 4.0 MPa、单机 900 kg/s 量级。
-     *  旧值 2.47e4 是按 0.7 MPa 二回路定径的，压力提高到 4 MPa 后必须重定径。 */
     /** 每台汽轮机循环水总量（m³/s）；分给 4 台凝汽器 */
     static final double CONDENSER_CW_M3S = 45.0;
 
-    static final double MAIN_STEAM_CV = 4.9e3;
+    /**
+     * 主汽门 Cv（2026-11-07 按**单回路 6.9 MPa** 重新定径）。
+     *
+     * <p>实测标定（LegacyFixProbe）：单回路 6.9 MPa 母管下，旧值 9.4e4 在
+     * **15 % 开度**就抽走 4 380 kg/s（两台合计），相当于一开阀就甩掉半台机的负荷；
+     * 汽包压力被瞬间拉低 1.5 MPa，RBMK 的正空泡反馈把功率在 5 s 内顶到 16 000 MW
+     * （额定的 3.4 倍），АР 根本来不及压。旧值是按 4 MPa 母管估的，压差一大流量就失控。</p>
+     *
+     * <p>按"全开每阀 900 kg/s"（RBMK-1500 单机 1 800 kg/s、两台机 4 只阀）反算：
+     * 6.9 MPa 下全开 ≈ 7 300 kg/s/阀 @ Cv=9.4e4 → 要 900 kg/s 需 Cv ≈ 1.16e4，
+     * 取 <b>1.2e4</b>。这样 20 % 开度约 1 460 kg/s（两台），是温和的升负荷速度。</p>
+     */
+    static final double MAIN_STEAM_CV = 1.2e4;
     
     private static Thread updateThread, printThread;
     private static boolean simPaused = false, updating = false, run = true;
@@ -96,6 +108,14 @@ public class NPPSim {
 
     //variables for update thread
     private static int updateCount = 0;
+    /**
+     * 自仿真开始以来的**累计** tick 数（1 tick = 50 ms）。
+     *
+     * <p>注意 {@link #updateCount} 是 printThread 每 900 ms 清零的"上一窗口内 tick 数"，
+     * 不能用来判断仿真跑了多久 —— 无头自检按它等目标步数会永远等不到。
+     * 这里另开一个只增不减的计数器。</p>
+     */
+    public static long totalTicks = 0;
     /** UI 刷新节拍（仿真每 4 tick ≈ 200ms 刷一次界面） */
     private int uiTickCounter = 0;
     //private static boolean updated = false;
@@ -106,7 +126,23 @@ public class NPPSim {
     /**
      * new simulation instance with default values
      */
+    /* ---- 启动分段计时（2026-11-11 性能）：只在 -Dnpp.startup.timing=true 时输出 ---- */
+    private static final boolean STARTUP_TIMING = Boolean.getBoolean("npp.startup.timing");
+    private static long startupMark;
+
+    private static void startupTiming(String label) {
+        if (!STARTUP_TIMING) {
+            return;
+        }
+        long now = System.nanoTime();
+        if (startupMark != 0L) {
+            System.out.printf("[启动] %-34s %7d ms%n", label, (now - startupMark) / 1_000_000L);
+        }
+        startupMark = now;
+    }
+
     public NPPSim() {
+        startupMark = STARTUP_TIMING ? System.nanoTime() : 0L;
         sdv_c = new ArrayList<>(); 
         sdv_a = new ArrayList<>();
         msvLoop1 = new ArrayList<>(); 
@@ -127,11 +163,14 @@ public class NPPSim {
 
         //parse the steam tables
         tables = Loader.tables;
+        startupTiming("蒸汽表 / 字段初始化");
         
         //initialize all components
         atmosphere = new Atmosphere(15);
         core = new Core();
+        startupTiming("堆芯 Core（3136 通道）");
         mcc = new MCC();
+        startupTiming("一回路 MCC（汽包 + 主泵 + 通道）");
 
         // 换热器 A/B（一回路→二回路）与汽水分离器 A/B（二次侧）
         // 注意：必须在给水混合器之前创建（混合器直接送水到换热器管侧）
@@ -147,7 +186,8 @@ public class NPPSim {
         separators.get(1).setSteamSource(separatorSources[1]);
 
         // 二次侧蒸汽母管：由汽水分离器供汽（不再直接接汽包）
-        steamPiping = new OneWaySteamHeader(separatorSources);
+        /* 主蒸汽母管（2026-11-07 单回路）：汽包 6.9 MPa 饱和蒸汽直接进汽机。 */
+        steamPiping = new OneWaySteamHeader(new Connectable[] {mcc.drum1, mcc.drum2});
         // 除氧器蒸汽出口联箱：全厂蒸汽先经过除氧器，再由这里供汽轮机 / 旁路 / 抽气器
         deaeratorSteamHeader = new SteamCollectorHeader();
 
@@ -174,10 +214,14 @@ public class NPPSim {
         /* 主汽门：汽源 = 主蒸汽母管（2026-10-19 改为直供）。
          * 旧接线是"分离器 → 除氧器 → 汽轮机"，全部蒸汽都要过除氧器，
          * 既要 30% 的假抽汽，又把主蒸汽压力降到 0.6 MPa（压力等级白提）。 */
-        TG1InletValves.add(new SteamValve(MAIN_STEAM_CV, 20, steamPiping, tg1));
-        TG1InletValves.add(new SteamValve(MAIN_STEAM_CV, 20, steamPiping, tg1));
-        TG2InletValves.add(new SteamValve(MAIN_STEAM_CV, 20, steamPiping, tg2));
-        TG2InletValves.add(new SteamValve(MAIN_STEAM_CV, 20, steamPiping, tg2));
+        /* 主汽门全行程 60 s（2026-11-07 单回路）：原来 20 s 全行程时，压力控制器
+         * 一发现汽包 6.9 > 设定 6.65 就开阀，5 s 就开到 25 %、抽走 1 000 kg/s，
+         * 汽包压力被瞬间拉低 1.5 MPa，触发 RBMK 正空泡把功率顶到 6 400 MW。
+         * 真实机组的升负荷曲线本来就慢，60 s 全行程相当于每 5 s 开 8 %。 */
+        TG1InletValves.add(new SteamValve(MAIN_STEAM_CV, 60, steamPiping, tg1));
+        TG1InletValves.add(new SteamValve(MAIN_STEAM_CV, 60, steamPiping, tg1));
+        TG2InletValves.add(new SteamValve(MAIN_STEAM_CV, 60, steamPiping, tg2));
+        TG2InletValves.add(new SteamValve(MAIN_STEAM_CV, 60, steamPiping, tg2));
 
         //add the eight SDV-C valves, 4 per loop（旁路膨胀阀：除氧器出口 → 凝汽器）
         for (int i = 0; i < 4; i++) {
@@ -238,7 +282,11 @@ public class NPPSim {
                     i < 2 ? tg1.extractionPort : tg2.extractionPort,
                     i < 2 ? tg1.condenser : tg2.condenser));
             // 除氧器水入口：水来自 PCS 凝结水过滤段（热阱），不再直接取自凝结水联箱
-            dearatorValves.add(new WaterValve(1667.52, 12, lpHeater, dearators.get(i))); //1206.3
+            /* 除氧器进水阀 Cv（2026-11-04 缩小）：原 1667 在 LP 加热器与除氧器 0.53 MPa
+             * 的压差下全开能灌进约 2,800 kg/s（单台），是额定给水量的 5 倍多。
+             * 水位控制只有"开/关"两档，一开就洪水式进水 —— 面板上就是"莫名其妙一直进水"。
+             * 按单台额定 ~500 kg/s、留 40 % 余量重定径：Cv 420 ≈ 全开 700 kg/s。 */
+            dearatorValves.add(new WaterValve(420.0, 12, lpHeater, dearators.get(i)));
         }
         // 低压加热器疏水 → 4 台除氧器（此时除氧器才建好）
         if (lpHeater != null) {
@@ -251,8 +299,9 @@ public class NPPSim {
         
         //initialize feedwater pumps and piping/valves
         // 给水 → 换热器管侧（不再是直接进汽包；汽包水位由换热器凝结水回注维持）
-        feedwaterMixer1 = new WaterMixer(heatExchangers.get(0), 2);
-        feedwaterMixer2 = new WaterMixer(heatExchangers.get(1), 2);
+        /* 给水直接进汽包（单回路） */
+        feedwaterMixer1 = new WaterMixer(mcc.drum1, 2);
+        feedwaterMixer2 = new WaterMixer(mcc.drum2, 2);
         
         //auxiliaryFWSuctionHeader = new SimpleSuctionHeader(new Connectable[] {dearators.get(0), dearators.get(1), dearators.get(2), dearators.get(3)});
         fwSuctionHeader = new SimpleSuctionHeader(new Connectable[] {dearators.get(0), dearators.get(1), dearators.get(2), dearators.get(3)}, 1);
@@ -282,6 +331,7 @@ public class NPPSim {
         
         //PCS
         pcs = new PCS();
+        startupTiming("二回路（汽机/凝汽器/除氧器/给水/PCS）");
         // PCS 凝结水过滤段的排污送除盐水箱
         pcsCondensateFilter.setBlowdownSink(pcs.demineralizedWaterTank);
 
@@ -330,6 +380,14 @@ public class NPPSim {
         
         //initialize the automatic control system
         autoControl = new AutoControl();
+        /* 冷启动默认投运：除氧器/给水/热井水位自动 + 自动 AZ（2026-11-17）。
+         * 只投开关、不改设备状态 —— 堆芯仍是全插棒 0 MW、泵仍停、汽机仍跳闸。
+         * 标准工况（StandardIC）随后会覆盖成运行态的整定。 */
+        autoControl.applyColdStartDefaults();
+        startupTiming("自动控制 AutoControl");
+        /* 电气系统：放在所有泵/汽机之后建，第一次 update 就能读到真实负荷 */
+        grid = new ElectricalGrid();
+        grid.resetToNominal();
 
         //set variables if needed
 //        core.coreArray.forEach(row -> {
@@ -363,6 +421,7 @@ public class NPPSim {
         //initialize UI
         simPaused = false;
         ui = new UI();
+        startupTiming("界面 UI");
 
         //start simulation
         run = true;
@@ -423,6 +482,8 @@ public class NPPSim {
 
         autoControl = plant.autoControl;
         pcs = plant.pcs;
+        /* 电气系统：新存档带完整状态；旧存档没有这个字段（null）→ 按额定接线补建 */
+        grid = plant.grid != null ? plant.grid : new ElectricalGrid();
 
         heatExchangers = orEmpty(plant.heatExchangers);
         separators = orEmpty(plant.separators);
@@ -483,16 +544,16 @@ public class NPPSim {
     /** 重新连接 transient 字段（Separator.steamSource）以及读档后可能失效的静态别名。 */
     private void relinkPlant() {
         if (steamPiping != null) {
-            steamPiping.sources = separatorSources;
+            steamPiping.sources = new Connectable[] {mcc.drum1, mcc.drum2};
         }
         for (int i = 0; i < separators.size() && i < separatorSources.length; i++) {
             separators.get(i).setSteamSource(separatorSources[i]);
         }
         if (feedwaterMixer1 != null && heatExchangers.size() > 0) {
-            feedwaterMixer1.drain = heatExchangers.get(0);
+            feedwaterMixer1.drain = mcc.drum1;
         }
         if (feedwaterMixer2 != null && heatExchangers.size() > 1) {
-            feedwaterMixer2.drain = heatExchangers.get(1);
+            feedwaterMixer2.drain = mcc.drum2;
         }
         if (deaeratorSteamHeader != null) {
             deaeratorSteamHeader.setSources(dearators.toArray(new Connectable[0]));
@@ -553,6 +614,9 @@ public class NPPSim {
                     TG.updateGridPhase(); //static variable of class TG updated
                     tg1.update();
                     tg2.update();
+                    /* 电气系统：按本 tick 的发电机出力与各泵电流算厂用电/上网功率，
+                     * 母线失电时在这里做联锁（跳泵、柴油机自启、直流转蓄电池）。 */
+                    grid.update();
                     ejectors.forEach(ejector -> {
                         ejector.update();
                     });
@@ -654,83 +718,25 @@ public class NPPSim {
                     core.update();
                     NPPSim.core1 = false;
 
-                    /* ---- 堆芯 → 一回路热耦合（2026-10-27 补）----
-                     * 之前堆芯功率只喂给动力学与界面，汽包没有任何热源（FuelChannel.update() 是空实现），
-                     * 一回路只能靠"降压闪蒸"出汽 —— 二回路产汽量与反应堆功率脱钩，
-                     * 高功率时也不会多产汽、低功率也不会少产汽，看起来就是"凭空产生蒸汽"。
-                     * 现在把 Core.thermalPower 两台汽包均分注入，产汽量由能量平衡决定：
-                     *   水升温 → 到饱和 → 蒸发 → 汽包压力升高 → 换热器抽汽增加 → 二回路产汽。 */
-                    double coreMW = coreHeatOverrideMW >= 0.0 ? coreHeatOverrideMW : core.getThermalPower();
-                    if (!Double.isFinite(coreMW)) {
-                        coreMW = 0.0;
-                    }
-                    coreMW = Math.max(0.0, coreMW);
-                    mcc.drum1.addCoreHeatMW(coreMW * 0.5);
-                    mcc.drum2.addCoreHeatMW(coreMW * 0.5);
+                    /* ---- 堆芯 → 一回路热的唯一路径（2026-11-01 修正）----
+                     * 堆芯功率由 Core 下发给每一根燃料通道，通道自己完成"水升温 → 蒸发 → 送汽包"，
+                     * 汽包只做汽水分离（与真实 RBMK 的鼓式分离器一致）。
+                     *
+                     * 2026-10-27 的写法是：堆芯功率既让通道加热（Channels.java 里 thermalPower*50 kJ），
+                     * 又在这里把同一份 Core.thermalPower 均分注进两台汽包 —— 同一份 4800 MW 计了两次。
+                     * 后果是产汽量约 2 倍、汽包水位持续上涨、最后走泄压阀/排污，表现为"物质缓慢消失"。
+                     * 自检用的 coreHeatOverrideMW 改为在 Core.update() 内部替代堆芯功率，语义不变。 */
                     mcc.update();
 
-                    // ---- 一回路/二回路耦合 ----
-                    // 一回路：汽包 → 换热器壳侧（冷凝）→ 凝结水按同质量回注汽包（水量守恒）
-                    // 二回路：给水 → 换热器管侧（蒸发）→ 汽水分离器 → 二次侧蒸汽母管
+                    /* ---- 单回路（2026-11-07）：汽包蒸汽直接进母管，给水直接回汽包。 */
                     double mcpFlowKgs = 0;
                     for (Pump p : mcc.mcp) {
                         mcpFlowKgs += p.getFlowRate();
                     }
-                    double riverKgs = core.getOfflineCooling() != null
-                            ? core.getOfflineCooling().getTotalFlowKgs() : 0.0;
-                    MCC.SeparatorDrum[] drums = {mcc.drum1, mcc.drum2};
-                    for (int i = 0; i < 2 && i < heatExchangers.size(); i++) {
-                        HeatExchanger hx = heatExchangers.get(i);
-                        MCC.SeparatorDrum drum = drums[i];
-                        if (feedwaterOverrideKgs > 0.0) {
-                            hx.updateWaterInflow(feedwaterOverrideKgs * 0.5 * 0.05, 160.0);
-                        }
-                        hx.riverFlowKgs = riverKgs * 0.5;
-                        hx.riverOutTC = drum.getSteamTemperature();
-                        double kg = hx.updatePrimary(drum.getPressure(), drum.getSteamTemperature(),
-                                mcpFlowKgs, 0.05);
-                        /* 抽汽不能超过汽包汽空间的实际存量（2026-10-18 守恒修正）。
-                         * 换热器原先按压差抽汽、并按"抽多少就回多少凝结水"回注，
-                         * 但汽包可能根本没有这么多汽（主泵流量低/降功率时），
-                         * 多出来的凝结水就是凭空造水 —— 实测默认 2 台泵 40% 时
-                         * 汽包水位 300 s 从 0 涨到 +51%，同时换热器还在传 4.6 GW。
-                         * 这里按汽包可供量限流，并把回注量/传热量一起改成实际值。 */
-                        double availKg = drum.availableSteamKg();
-                        if (kg > availKg) {
-                            kg = Math.max(0.0, availKg);
-                        }
-                        /* 二回路吸收能力限流（2026-10-19 能量守恒修正）。
-                         * 一次侧按压差抽汽时，二次侧可能只蒸发了其中一部分（给水不够），
-                         * 差额热量原来直接消失：实测一次侧 4703 MW、二次侧约 3820 MW，
-                         * 差 880 MW。现在先问二回路"这 tick 最多能吸收多少"，按较小值抽汽，
-                         * 多出来的蒸汽留在汽包里 → 汽包压力上升 → 下一 tick 抽汽自然减小。 */
-                        double capKg = hx.maxCondensableKg(0.05);
-                        if (kg > capKg) {
-                            kg = Math.max(0.0, capKg);
-                        }
-                        hx.applyActualDraw(kg, 0.05);
-                        drum.updateSteamOutflow(kg, drum.getSteamTemperature());
-                        drum.updateWaterInflow(hx.condensateOutKgs * 0.05, drum.getSteamTemperature());
-                        hx.updateSecondary(0.05, separators.get(i).pressureMPa);
-                        separators.get(i).update(0.05, hx.steamOutKgs, hx.secondarySteamTC);
-                        separatorSources[i].refresh();
-                        // 二次侧水量守恒：分离器甩出的水 + 换热器里没蒸发的给水
-                        // 都回收到除氧器。旧实现只回收了分离器的水，而换热器管侧
-                        // 在"传热跟不上给水"时会把多余的水存在管侧（上限 80 t），
-                        // 于是给水进得去、出不来 —— 表现为"水并没有进入气分"。
-                        if (i < dearators.size()) {
-                            dearators.get(i).updateWaterInflow(
-                                    separators.get(i).outWaterKgs * 0.05, separators.get(i).outTempC);
-                            if (hx.secondaryDrainKgs > 0.0) {
-                                dearators.get(i).updateWaterInflow(
-                                        hx.secondaryDrainKgs * 0.05, hx.getWaterTemperature());
-                            }
-                        }
-                    }
-                    
                     autoControl.update();
                     //end of components to update
                     updateCount++;
+                    totalTicks++;
                     long end = System.nanoTime();
                     int timestep = (int)(end - start);
                     deltaTimeStepLength = (50000000 - timestep);
@@ -747,6 +753,9 @@ public class NPPSim {
             } catch (InterruptedException e) {
                 e.printStackTrace();
             } catch (Exception e) {
+                /* 无头自检（tools/dev/*Check）里没有窗口可看，必须把栈打到 stderr，
+                 * 否则仿真线程静默死掉、界面停在最后一帧，看起来像"模型不动作"。 */
+                e.printStackTrace();
                 new ErrorWindow("A fatal error occured", ExceptionUtils.getStackTrace(e), false).setVisible(true);
             }
         });
@@ -775,7 +784,16 @@ public class NPPSim {
                     updateCount = 0;
                     timeStepLengthCumulative = 0;
                     autoControl.updateSimulationTime();
-                    ui.update();
+                    /* 单帧界面刷新的异常不能打死这个节拍线程（2026-11-11）：
+                     * 这里一抛，printThread 就退出，之后所有窗口的数值冻结在最后一帧，
+                     * 但仿真还在跑 —— 看起来像"仿真不动了"，实际是刷新线程没了。 */
+                    try {
+                        ui.update();
+                        // 各泵窗口的槽式拨杆跟随模型（含失电/低油压联锁跳泵）
+                        javax.swing.SwingUtilities.invokeLater(PumpSwitchPanel::syncAll);
+                    } catch (Exception uiError) {
+                        uiError.printStackTrace();
+                    }
                     while (simPaused) {
                         Thread.sleep(100);
                     }

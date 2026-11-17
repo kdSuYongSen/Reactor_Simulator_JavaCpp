@@ -23,6 +23,13 @@ public final class TextFonts {
     private static volatile String preferredFamily = null;
     /** 该语言的样本字符（用于判断某字族能否显示该语言） */
     private static volatile String probe = "";
+    /**
+     * 强制模式（2026-11-12）：非 null 时**不检查**原字族能否显示，一律用该字族。
+     *
+     * <p>用于"优先使用字体目录里的字体"：Java 的逻辑字体（Dialog）自带回退链，
+     * 中文/日文也能"显示得出来"，但用的不是用户指定那份字体。只有强制才能让仪表也用上它。</p>
+     */
+    private static volatile String forcedFamily = null;
 
     private TextFonts() {
     }
@@ -38,6 +45,11 @@ public final class TextFonts {
         probe = (probeText == null) ? "" : probeText;
     }
 
+    /** 强制所有库内文本使用该字族（传 null 取消强制） */
+    public static void configureForced(String family) {
+        forcedFamily = (family == null || family.trim().isEmpty()) ? null : family;
+    }
+
     /**
      * 创建用于绘制界面文本的字体：优先保持原字族，若它显示不了当前语言则换成 preferredFamily。
      *
@@ -46,6 +58,10 @@ public final class TextFonts {
      * @param size            字号
      */
     public static Font get(String requestedFamily, int style, int size) {
+        String forced = forcedFamily;
+        if (forced != null) {
+            return new Font(forced, style, size);   // 强制模式：直接用指定字族
+        }
         String target = preferredFamily;
         if (target != null && !probe.isEmpty()) {
             Font requested = (requestedFamily == null) ? new Font("Dialog", style, size)

@@ -148,6 +148,11 @@ JNIEXPORT void JNICALL Java_com_rbmk_real_RbmkCore_nativeSetOfflineFlow(JNIEnv*,
     CORE(h)->setOfflineFlow(kgs);
 }
 
+JNIEXPORT void JNICALL Java_com_rbmk_real_RbmkCore_nativeSetDryoutFraction(JNIEnv*, jobject, jlong h, jdouble f)
+{
+    CORE(h)->setDryoutFraction(f);
+}
+
 JNIEXPORT void JNICALL Java_com_rbmk_real_RbmkCore_nativeSetSaturationTemp(JNIEnv*, jobject, jlong h, jdouble c)
 {
     CORE(h)->setSaturationTemp(c);

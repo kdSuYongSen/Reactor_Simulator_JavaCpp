@@ -464,8 +464,39 @@ public class Loader extends javax.swing.JFrame {
         }
     }//GEN-LAST:event_jButton4ActionPerformed
 
+    /**
+     * "Load Standard IC"：新建电厂后直接整定到 100% 额定稳态（2026-11-02）。
+     *
+     * <p>与 Start 的区别只有一步：构造完 NPPSim 之后调用 {@link StandardIC#apply()}。
+     * 整定内容见 StandardIC 的类注释（汽包 6.9 MPa/284 °C、主蒸汽母管 6.9 MPa、
+     * 除氧器 153 °C、8 台主泵全速、给水/除氧器/凝汽器自动投入、汽机并网）。</p>
+     */
     private void jButton5ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton5ActionPerformed
-        // TODO add your handling code here:
+        if (loading) {
+            return;
+        }
+        loading = true;
+        setLoading(true);
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            try {
+                simulation = new NPPSim();
+                boolean coreOk = StandardIC.apply();
+                if (!coreOk) {
+                    javax.swing.JOptionPane.showMessageDialog(this,
+                            Localization.t("app.error.coreSafeMode"),
+                            Localization.t("app.error.coreTitle"), javax.swing.JOptionPane.WARNING_MESSAGE);
+                }
+                Loader.loader.setVisible(false);
+            } catch (Throwable t) {
+                loading = false;
+                setLoading(false);
+                t.printStackTrace();
+                javax.swing.JOptionPane.showMessageDialog(this,
+                        Localization.t("app.error.createFailed") + "\n" + t
+                                + Localization.t("app.error.details"),
+                        Localization.t("app.error.startTitle"), javax.swing.JOptionPane.ERROR_MESSAGE);
+            }
+        });
     }//GEN-LAST:event_jButton5ActionPerformed
 
     private void jButton6ActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_jButton6ActionPerformed

@@ -83,6 +83,7 @@ void RbmkCore::resetToNominal()
     tShutdown_     = 0.0;
     rhoExt_        = 0.0;
     regIntegral_   = 0.0;
+    dryoutFrac_    = 0.0;
     xenonAlpha_    = XENON_WORTH_EQ / XE_EQ_NOM;
 
     /* --- 冷却剂轴向剖面: 自下而上按焓积分（总功率 = 燃料 564 + 石墨 36 MW） --- */
@@ -349,6 +350,9 @@ void RbmkCore::rhs(const double* u, double* du) const
 
     const double decay = decayHeatFraction();
     const double vmNow = voidMean(u);      /* 堆芯平均空泡（体积平均） */
+    /* 干涸通道占比 -> 堆芯平均换热系数。并联通道里干涸的那部分几乎不传热，
+     * 按体积份额线性加权：H_eff = H_CM * (1 - 0.95f)。f=0 时与原先完全一致。 */
+    const double hcm = H_CM * (1.0 - 0.95 * dryoutFrac_);
 
     for (int j = 0; j < N; ++j) {
         double n     = nA[j];
@@ -389,12 +393,12 @@ void RbmkCore::rhs(const double* u, double* du) const
         du[N + j] = (Pf + Pd - H_FC * (Tf - Tc)) / (M_FUEL_NODE * CP_FUEL);
 
         /* --- 包壳区 --- */
-        du[2 * N + j] = (H_FC * (Tf - Tc) - H_CM * (Tc - Tcool))
+        du[2 * N + j] = (H_FC * (Tf - Tc) - hcm * (Tc - Tcool))
                       / (M_CLAD_NODE * CP_CLAD);
 
         /* --- 冷却剂区 (焓平衡, 沸腾段隐含潜热) --- */
         double Tin   = inletTemp(j, u);
-        double qin   = H_CM * (Tc - Tcool) + H_MOD * (Tmod - Tcool);
+        double qin   = hcm * (Tc - Tcool) + H_MOD * (Tmod - Tcool);
         double qflow = 2.0 * flow_ * (enthalpyOf(Tcool) - enthalpyOf(Tin));
         double Ccool = M_COOL_NODE * dhdTOf(Tcool);
         /* 离线冷却：外部河水经换热器冷却一回路（20C 冷源置换热沉，开式不回收）
@@ -673,6 +677,9 @@ void RbmkCore::setOfflineFlow(double kgs)  { offlineFlow_ = (kgs > 0.0) ? kgs : 
 void RbmkCore::setSaturationTemp(double c) { tSat_ = clampd(c, 100.0, 370.0); }
 void RbmkCore::setInletEnthalpy(double jPerKg) { hIn_ = jPerKg; }
 void RbmkCore::setFlowFraction(double f)  { setFlow(MDOT_NOM * clampd(f, 0.0, 2.0)); }
+
+/* 干涸通道占比（0..1）。只影响传热，不影响功率标定；f=0 时完全回到额定。 */
+void RbmkCore::setDryoutFraction(double f) { dryoutFrac_ = clampd(f, 0.0, 1.0); }
 void RbmkCore::freeze()                   { frozen_ = true; }
 
 void RbmkCore::setRegulatorEnabled(bool on)

@@ -21,46 +21,14 @@ public class DearatorUI extends javax.swing.JFrame implements UIUpdateable {
         WindowMenu.install(this);        // 统一窗口导航（含新增页面）
         PageLayout.installAuto(this, "DearatorUI");   // 本页布局可由布局编辑器调整
         annunciator = new Annunciator(annunciatorPanel);
-        level1.setTrackVisible(true);
-        level1.setTrackStop(40);
-        level1.setTrackStart(25);
-        // 水位定义是"相对额定水容积的偏差点"（正常 0，干锅 -100，满水 +100）；
-        // 原来量程只有 0..40，冷态 0 就贴底、负水位完全看不到 —— 指针像"坏了"。
-        level1.setMinValue(-100);
-        level1.setMaxValue(100);
-        level1.setTrackSectionColor(new java.awt.Color(255, 0, 0));
-        level1.setTrackStartColor(new java.awt.Color(255, 0, 0));
-        level1.setTrackStopColor(new java.awt.Color(255, 0, 0));
-        level2.setTrackVisible(true);
-        level2.setTrackStop(40);
-        level2.setTrackStart(25);
-        // 水位定义是"相对额定水容积的偏差点"（正常 0，干锅 -100，满水 +100）；
-        // 原来量程只有 0..40，冷态 0 就贴底、负水位完全看不到 —— 指针像"坏了"。
-        level2.setMinValue(-100);
-        level2.setMaxValue(100);
-        level2.setTrackSectionColor(new java.awt.Color(255, 0, 0));
-        level2.setTrackStartColor(new java.awt.Color(255, 0, 0));
-        level2.setTrackStopColor(new java.awt.Color(255, 0, 0));
-        level3.setTrackVisible(true);
-        level3.setTrackStop(40);
-        level3.setTrackStart(25);
-        // 水位定义是"相对额定水容积的偏差点"（正常 0，干锅 -100，满水 +100）；
-        // 原来量程只有 0..40，冷态 0 就贴底、负水位完全看不到 —— 指针像"坏了"。
-        level3.setMinValue(-100);
-        level3.setMaxValue(100);
-        level3.setTrackSectionColor(new java.awt.Color(255, 0, 0));
-        level3.setTrackStartColor(new java.awt.Color(255, 0, 0));
-        level3.setTrackStopColor(new java.awt.Color(255, 0, 0));
-        level3.setTrackVisible(true);
-        level4.setTrackStop(40);
-        level4.setTrackStart(25);
-        // 水位定义是"相对额定水容积的偏差点"（正常 0，干锅 -100，满水 +100）；
-        // 原来量程只有 0..40，冷态 0 就贴底、负水位完全看不到 —— 指针像"坏了"。
-        level4.setMinValue(-100);
-        level4.setMaxValue(100);
-        level4.setTrackSectionColor(new java.awt.Color(255, 0, 0));
-        level4.setTrackStartColor(new java.awt.Color(255, 0, 0));
-        level4.setTrackStopColor(new java.awt.Color(255, 0, 0));
+        /* 水位条（2026-11-04 修正红区位置）：
+         * 量程改成 −100…+100 之后，红区还留着旧量程 0…40 时代的 25…40，
+         * 于是红块"悬"在刻度中间，和报警对不上。现在按真实报警线画：
+         * **+20 % 以上**（Annunciator 的高水位阈值）一直到满量程都是红区。 */
+        setupLevelGauge(level1);
+        setupLevelGauge(level2);
+        setupLevelGauge(level3);
+        setupLevelGauge(level4);
         initializeDialUpdateThread();
         
         //set variables
@@ -103,6 +71,23 @@ public class DearatorUI extends javax.swing.JFrame implements UIUpdateable {
             over3.setLcdValue(pcs.dearatorOverflowValves.get(2).timestepFlow * 20);
             over4.setLcdValue(pcs.dearatorOverflowValves.get(3).timestepFlow * 20);
         }
+    }
+
+    /**
+     * 除氧器水位条统一整定（2026-11-04）。
+     *
+     * <p>量程取 ±100 %（相对额定水容积的偏差），红区从**高水位报警线 +20 %** 一直到满量程。
+     * 之前四个条各写一遍、还留着旧量程 0…40 的 25…40，红块位置和报警阈值对不上。</p>
+     */
+    private static void setupLevelGauge(eu.hansolo.steelseries.gauges.Linear g) {
+        g.setMinValue(-100);
+        g.setMaxValue(100);
+        g.setTrackVisible(true);
+        g.setTrackStart(20);        // = Annunciator 的高水位报警阈值
+        g.setTrackStop(100);
+        g.setTrackSectionColor(new java.awt.Color(255, 0, 0));
+        g.setTrackStartColor(new java.awt.Color(255, 0, 0));
+        g.setTrackStopColor(new java.awt.Color(255, 0, 0));
     }
 
     @Override

@@ -28,6 +28,9 @@ import javax.swing.UIManager;
  *     - 主动把样本字符**光栅化一次**，逼系统把字形加载进缓存（避免首帧才加载导致的闪烁/方框）。
  *  3) **兜底修复**：挂全局 AWT 监听（窗口打开/激活）+ 容器监听（组件后加入），
  *     把仍显示不了该语言的字体就地替换（保留字号与粗细）。
+ *  4) **字体文件**（2026-11-12）：选字族之前先让 {@link FontFiles} 扫描字体目录并注册，
+ *     系统里没有合适字体时直接用用户放进去的 .ttf/.otf，
+ *     判定依据也从"一句样本"升级为"当前语言真正会显示的全部字符"。
  */
 public final class Fonts {
 
@@ -44,7 +47,13 @@ public final class Fonts {
     };
 
     private static String family;   // null = 无需替换（拉丁/西里尔语言）
+    /** true = 无条件把界面字体换成 family（用户勾了"优先使用字体目录"时） */
+    private static boolean forceFamily = false;
     private static String sample = "";
+    /** 当前界面真正会显示的字符集合（ASCII + 当前语言全部译文），字体文件按它判覆盖度 */
+    private static String required = "";
+    /** 组件字体能否显示 required 的判定缓存（Font 的 equals 按属性比较，命中率很高） */
+    private static final java.util.HashMap<Font, Boolean> COVERS_CACHE = new java.util.HashMap<>();
     private static Font uiFont;     // 代表字体（用于预加载光栅化）
     private static boolean installed = false;
 
@@ -54,23 +63,60 @@ public final class Fonts {
     /** 启动时调用一次（语言切换后再次调用即可重新预加载） */
     public static void init() {
         Language lang = Localization.getLanguage();
+        /* 0) 先把用户字体目录里的字体文件注册进 JVM（2026-11-12）：
+         *    之后 new Font(字族名, ...) 在 Swing 与仪器库里都能直接用。
+         *    幂等 —— 语言切换时不会重复扫描目录。 */
+        FontFiles.loadOnce();
+
         sample = sampleFor(lang);
-        family = pickFamily(lang, sample);
+        /* 目标文字 = ASCII（数字/单位/英文键名）+ 当前语言译文里真正出现的字符。
+         * 只看 sample 会漏掉译文里的生僻字：字体"能显示这句样本"不等于"能显示全部界面文字"。 */
+        required = requiredText();
+        COVERS_CACHE.clear();
+
+        String systemFamily = pickFamily(lang, sample);
+        int systemOk = coverage(systemFamily, required);
+        boolean systemCovers = systemOk >= required.length();
+        String fileFamily = FontFiles.pickFor(required);
+        int fileOk = FontFiles.coverage(fileFamily, required);
+
+        if (FontFiles.isPreferFile() && fileFamily != null) {
+            family = fileFamily;                    // 用户勾了"优先用字体目录"
+            forceFamily = true;
+        } else if (systemCovers) {
+            family = systemFamily;                  // 系统字体够用 → 保持原观感
+        } else if (fileFamily != null && fileOk > systemOk) {
+            family = fileFamily;                    // 只有字体文件**确实更好**才换过来
+        } else {
+            family = systemFamily;                  // 都覆盖不全 → 退回系统候选（尽力而为）
+        }
+        if (!FontFiles.isPreferFile() || fileFamily == null) {
+            forceFamily = false;
+        }
+        if (family != null) {
+            System.out.println("[Fonts] 界面语言 " + lang.id() + " 使用字族 " + family
+                    + (FontFiles.sourceOf(family) != null ? "（来自字体文件 "
+                    + FontFiles.sourceOf(family).getName() + "）" : "（系统字体）"));
+        }
 
         // ---- 2) 预加载 ----
-        // 2a) 让库内绘制（仪表标题/刻度/LCD 文本）也使用能显示本语言文字的字族
-        eu.hansolo.steelseries.tools.TextFonts.configure(family, sample);
+        // 2a) 让库内绘制（仪表标题/刻度/LCD 文本）也使用能显示本语言文字的字族。
+        //     probe 只取样本：这个方法是绘制热路径，探针不能是几千字的全集。
+        String textProbe = !sample.isEmpty() ? sample
+                : (required.length() > 64 ? required.substring(0, 64) : required);
+        eu.hansolo.steelseries.tools.TextFonts.configure(family, textProbe);
+        eu.hansolo.steelseries.tools.TextFonts.configureForced(forceFamily ? family : null);
         // 2b) UIManager 默认字体：替换掉显示不了本语言的项（新建组件即刻正确）
         if (family != null) {
             for (String key : UI_FONT_KEYS) {
                 Font cur = UIManager.getFont(key);
-                if (cur != null && cur.canDisplayUpTo(sample) != -1) {
+                if (cur != null && (forceFamily || cur.canDisplayUpTo(required) != -1)) {
                     UIManager.put(key, new Font(family, cur.getStyle(), cur.getSize()));
                 }
             }
             // 2c) 预栅格化：逼系统把字形载入缓存
             uiFont = new Font(family, Font.PLAIN, 14);
-            preloadGlyphs(uiFont, sample);
+            preloadGlyphs(uiFont, required);
         } else {
             uiFont = null;
         }
@@ -106,15 +152,79 @@ public final class Fonts {
         return eu.hansolo.steelseries.tools.TextFonts.get(requestedFamily, style, size);
     }
 
+    /** 当前生效的界面字族（null = 用系统默认，不做替换）；设置界面与自检用 */
+    public static String currentFamily() {
+        ensureInit();
+        return family;
+    }
+
     /** 同上，不指定原字族 */
     public static Font text(int style, int size) {
         return text(null, style, size);
     }
 
     private static void ensureInit() {
-        if (family == null && sample.isEmpty() && !installed) {
+        if (!installed) {
             init();
         }
+    }
+
+    /**
+     * 目标文字集合：ASCII 可打印字符（数字、单位、英文键名）+ 当前语言译文里出现的所有字符。
+     *
+     * <p>字体文件必须能**完整**覆盖这个集合才算"能显示目标文字"，
+     * 否则界面上总会有几个字变成方框。</p>
+     */
+    private static String requiredText() {
+        StringBuilder raw = new StringBuilder(256);
+        for (char c = 32; c < 127; c++) {
+            raw.append(c);
+        }
+        raw.append(Localization.usedCharacters());
+        java.util.LinkedHashSet<Character> set = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c != '\n' && c != '\r' && c != '\t') {
+                set.add(c);
+            }
+        }
+        StringBuilder out = new StringBuilder(set.size());
+        for (Character c : set) {
+            if (out.length() >= 8000) {
+                break;
+            }
+            out.append(c.charValue());
+        }
+        return out.toString();
+    }
+
+    /** 该字族（null = 系统默认 Dialog）能显示目标文字里的多少个字符 */
+    private static int coverage(String fam, String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        Font f = new Font(fam == null ? "Dialog" : fam, Font.PLAIN, 12);
+        int ok = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isSurrogate(c) || f.canDisplay(c)) {
+                ok++;
+            }
+        }
+        return ok;
+    }
+
+    /** 单个组件字体是否够用（带缓存：同一窗口里大量组件共用几种字体） */
+    private static boolean canShow(Font f) {
+        if (required.isEmpty()) {
+            return true;
+        }
+        Boolean ok = COVERS_CACHE.get(f);
+        if (ok == null) {
+            ok = f.canDisplayUpTo(required) == -1;
+            COVERS_CACHE.put(f, ok);
+        }
+        return ok;
     }
 
     /** 把样本文字画到 1×1 离屏图上，促使字形加载（预加载的关键一步） */
@@ -167,7 +277,7 @@ public final class Fonts {
             return;
         }
         Font f = c.getFont();
-        if (f != null && !sample.isEmpty() && f.canDisplayUpTo(sample) != -1
+        if (f != null && family != null && (forceFamily || !canShow(f))
                 && !family.equals(f.getFamily())) {
             c.setFont(new Font(family, f.getStyle(), f.getSize()));
         }

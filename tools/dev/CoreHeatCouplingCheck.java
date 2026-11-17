@@ -19,6 +19,20 @@ public class CoreHeatCouplingCheck {
         new NPPSim();
         Thread.sleep(800);
 
+        /* 2026-11-01：热量现在只能走"堆芯 → 燃料通道 → 汽包"，
+         * 4800 MW 下通道蒸发约 3100 kg/s，一回路循环流量必须大于它，
+         * 否则通道会干锅。这里把 8 台主泵全部投运（额定 6 台 ≈ 12000 kg/s）。 */
+        for (Pump p : NPPSim.mcc.mcp) {
+            p.setActive(true);
+            p.setSetPoint(1.0f);
+        }
+        /* 热态起步（2026-11-01）：真实机组不可能从 20 °C 直接满功率，
+         * 一回路装量（汽包 223 t + 两根压力母管 243 t + 通道 28 t）约 500 t，
+         * 冷态升温到饱和要好几分钟，自检窗口里看不到耦合。这里直接把一回路
+         * 预置到 270 °C 额定入口温度，测的是"热态下功率→产汽"的响应。 */
+        NPPSim.mcc.setWaterTemp(270.0);
+        Thread.sleep(20000);   // 等 8 台泵升到全速（加速时间 18 s），否则满功率会先把通道烧干
+
         MCC.SeparatorDrum d1 = NPPSim.mcc.drum1;
         MCC.SeparatorDrum d2 = NPPSim.mcc.drum2;
 
@@ -46,6 +60,8 @@ public class CoreHeatCouplingCheck {
                     NPPSim.heatExchangers.get(0).primarySteamInKgs,
                     NPPSim.separators.get(0).outSteamKgs,
                     NPPSim.heatExchangers.get(0).primaryHeatMW);
+            System.out.printf("      [诊断] MCP %.0f kg/s | 通道合计功率 %.0f MW | 通道平均水温 %.1f°C | 通道产汽 %.0f kg/s%n",
+                    mcpFlow(), channelPowerMW(), channelTemp(), channelSteamKgs());
         }
         double steamHot = steamOut();
         double pHot = d1.getPressure();
@@ -53,7 +69,9 @@ public class CoreHeatCouplingCheck {
 
         // ---- 回 0 MW：应降温/降产汽 ----
         NPPSim.coreHeatOverrideMW = 0;
-        Thread.sleep(20000);
+        /* 40 s 而不是 20 s：汽包现在按分离器建模，汽空间里存着 5 t 左右蒸汽，
+         * 断热后这段存量还会继续供汽一段时间，20 s 窗口内掉不到 60% 以下。 */
+        Thread.sleep(40000);
         double steamCold = steamOut();
         System.out.printf("回 0 MW 20 s：汽包 %.3f MPa / %.1f°C  二回路出口汽 %.1f kg/s%n",
                 d1.getPressure(), d1.getWaterTemperature(), steamCold);
@@ -77,6 +95,53 @@ public class CoreHeatCouplingCheck {
 
     static double mass(MCC.SeparatorDrum d) {
         return d.getWaterMass() + d.getSteamMass();
+    }
+
+    /* ---- 2026-11-01 诊断：确认"堆芯功率只走通道"这条路的能量到底有没有到汽包 ---- */
+    static double mcpFlow() {
+        double s = 0;
+        for (Pump p : NPPSim.mcc.mcp) {
+            s += p.getFlowRate();
+        }
+        return s;
+    }
+
+    static double channelPowerMW() {
+        double s = 0;
+        for (java.util.ArrayList<Channel> row : NPPSim.core.coreArray) {
+            for (Channel c : row) {
+                if (c instanceof FuelChannel) {
+                    s += ((FuelChannel) c).getThermalPower();
+                }
+            }
+        }
+        return s;
+    }
+
+    static double channelTemp() {
+        double s = 0;
+        int n = 0;
+        for (java.util.ArrayList<Channel> row : NPPSim.core.coreArray) {
+            for (Channel c : row) {
+                if (c instanceof FuelChannel) {
+                    s += ((FuelChannel) c).getWaterTemperature();
+                    n++;
+                }
+            }
+        }
+        return n == 0 ? 0 : s / n;
+    }
+
+    static double channelSteamKgs() {
+        double s = 0;
+        for (java.util.ArrayList<Channel> row : NPPSim.core.coreArray) {
+            for (Channel c : row) {
+                if (c instanceof FuelChannel) {
+                    s += ((FuelChannel) c).getSteamProduction();
+                }
+            }
+        }
+        return s;
     }
 
     /** 二回路产汽量（换热器管侧实际蒸发量，不受分离器出口阀位影响） */
